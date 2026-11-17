@@ -190,6 +190,7 @@ export function analyze(doc, page, pageSize) {
   let tm = IDENT.slice(), tlm = IDENT.slice(), leading = 0, fontSize = 0, cont = false, lastHead = -1, tr = 0;
   const placements = [];
   const shows = [];
+  const opSet = new Set();
   const pageArea = pageSize ? pageSize[0] * pageSize[1] : Infinity;
 
   const bboxOf = (m, pts) => {
@@ -221,6 +222,7 @@ export function analyze(doc, page, pageSize) {
       operands = [];
       continue;
     }
+    opSet.add(tk.v);
     const nums = operands.map((o) => o.v);
     switch (tk.v) {
       case 'q': stack.push(ctm.slice()); break;
@@ -258,7 +260,7 @@ export function analyze(doc, page, pageSize) {
     }
     operands = [];
   }
-  return { src, placements, shows, depthEnd: stack.length };
+  return { src, placements, shows, ops: opSet, depthEnd: stack.length };
 }
 
 /* ---------- réécriture ---------- */

@@ -76,7 +76,7 @@ export async function identify(maskCanvas, text, opt = {}) {
   }).filter(Boolean);
   if (!words.length) return null;
   for (const w of words) { w.GW = Math.max(6, Math.min(300, Math.round(GH * w.tw / w.th))); w.g = grid(maskCanvas, w.xa, w.ya, w.tw, w.th, w.GW); }
-  const S0 = 120, ranked = [];
+  const S0 = 72, ranked = [];
   for (const c of LIB) {
     if (!c.ok) continue;
     const m0 = draw(c, text, S0, 0);
@@ -103,13 +103,14 @@ export async function identify(maskCanvas, text, opt = {}) {
     }
     if (bad || !sUni) continue;
     const ls = lsN ? lsSum / lsN : 0, iou = sInter / sUni;
-    const pen = 1.5 * Math.abs(ls) / S0 + (opt.prefer && opt.prefer.includes(c.id) ? -0.03 : 0);
+    const pen = 1.5 * Math.abs(ls) / S0 + (opt.prefer && opt.prefer.includes(c.id) ? -0.03 : 0) + (opt.families && opt.families.includes(c.family) ? -0.045 : 0); // a priori : familles déjà reconnues avec certitude dans le document
     ranked.push({ c, score: iou - pen, iou, pw, ls: ls * k, size: S0 * k, baseOff: m0.baseOff * k, lsb: (m0.bx - S0 * 0.4) * k, k });
   }
   ranked.sort((a, b) => b.score - a.score);
   if (!ranked.length) return null;
   // police propre à chaque mot (ex. « 6 compétences » en gras dans une ligne en romain) : seulement si le gain est net
-  const top = ranked[0];
+  let top = ranked[0];
+  if (opt.force) { const f = ranked.find((r) => r.c.id === opt.force); if (f && f.score >= top.score - 0.07) top = f; } // police imposée par le contexte (lignes voisines de même style)
   const wordFonts = words.map((w, i) => {
     if ([...w.text].length < 4 || words.length < 2) return null;
     let best = null, bs = -1;

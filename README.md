@@ -17,17 +17,20 @@
 L'export passe par [pdf-lib](https://pdf-lib.js.org/) : les pages d'origine, leurs ressources, formulaires, signets, etc. sont conservés ; seuls les flux de contenu des pages modifiées sont réécrits (et rééquilibrés `q`/`Q`). Les objets ajoutés sont de vrais éléments PDF (texte, rectangles, images). Le résultat est vérifié avec `qpdf --check` et `poppler`.
 
 
-## PDF scannés ou « dessinés » (image + couche OCR)
+## PDF scannés ou « dessinés » (image + couche OCR) : import de page
 
 Beaucoup de PDF (brochures exportées en image, scans, PDF OCR) ne contiennent **aucune police ni couleur** : le texte visible est une image, et le texte réel est une couche invisible (« Glyphless »).
-L'éditeur le détecte et reconstitue le texte au clic :
+À l'affichage d'une page de ce type (ou via le bouton **Analyser la page**), l'éditeur la reconstitue entièrement :
 
-1. il retrouve sur la page (rendue à ~288 ppi) la ligne de lettres réellement visible sous le clic ;
-2. il redessine le texte connu (OCR) avec chaque police de la bibliothèque libre incluse (`fonts/`) et garde celle dont la silhouette recouvre le mieux l'encre : famille, graisse, **corps**, **interlettrage** et ligne de base sont déduits (comparaison mot à mot) ;
-3. il relève la **couleur de chaque mot** et la couleur de fond ;
-4. l'ancienne ligne est masquée (aplat à la couleur du fond) et le texte reconstitué est éditable comme dans un traitement de texte ; à l'export il est écrit avec la police intégrée (sous-ensemble).
+1. chaque ligne OCR est retrouvée sur la page rendue à ~288 ppi (l'encre réellement visible) ;
+2. la police est reconnue en redessinant le texte connu avec chaque police de la bibliothèque libre incluse (`fonts/`) : famille, graisse, **corps**, **interlettrage**, ligne de base, comparaison mot à mot, police par mot, cohérence de style entre lignes ;
+3. la **couleur de chaque mot** et la couleur de fond sont relevées ;
+4. les lignes d'un même paragraphe sont regroupées en un **bloc de texte** à largeur fixe (reflux dans le bloc, retours à la ligne d'origine vérifiés) ;
+5. le texte est **effacé de l'image de fond** (interpolation du fond) et l'image remplacée dans le PDF ; le texte vivant est ajouté par-dessus, avec la police intégrée, et la couche OCR invisible est supprimée.
 
-Limites : seules les familles de la bibliothèque sont reconnues (la plus proche est choisie sinon ; on peut importer sa police .ttf/.otf) ; fond uni recommandé sous le texte (pas de remplissage de photo) ; les très petits corps sont moins fiables.
+L'annulation (Ctrl+Z) restaure la page d'origine.
+
+Limites : seules les familles de la bibliothèque sont reconnues (la plus proche est choisie sinon ; on peut importer sa police .ttf/.otf) ; le fond effacé est reconstitué par interpolation (parfait sur aplats et dégradés simples, approximatif sur photos) ; les très petits corps et les graisses voisines sont moins fiables ; pas encore d'OCR pour les scans sans couche texte ; ~10 à 80 s par page.
 
 ## Limites connues
 

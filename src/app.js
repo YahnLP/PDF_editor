@@ -1,6 +1,6 @@
 import * as pdfjsLib from 'pdfjs-dist/build/pdf.min.mjs';
 import 'pdfjs-dist/build/pdf.worker.min.mjs';
-import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFDict, StandardFonts, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as E from './engine.js';
 import * as RT from './richtext.js';
@@ -25,7 +25,7 @@ const STD_META = {
 const S = {
   name: 'document.pdf', origBytes: null, origDoc: null, pdf: null,
   pages: [], cur: 0, zoom: 1, tool: 'select',
-  objs: [], analysis: [], lines: [], sel: null, editing: null,
+  objs: [], analysis: [], lines: [], sel: null, editing: null, bgFix: [], imported: [],
   undo: [], redo: [], fonts: [], assets: {}, seq: 1,
   baseSig: '', rebuildSeq: 0, renderSeq: 0, canvasScale: 1, ghosts: new Set(), modified: false,
 };
@@ -569,11 +569,15 @@ async function computeLines() {
     S.pageProxy = page;
   } catch (e) { console.warn(e); }
 }
+const rmsOf = (o) => (o.rms || (o.rm ? [o.rm] : []));
+function lineCovered(l) {
+  return (S.objs[S.cur] || []).some((o) => !o.deleted && rmsOf(o).some((r) => Math.abs(r.y - l.f) < 0.6 && l.e < r.x1 && l.x1 > r.x0));
+}
 function lineAt(x, y) {
   for (const l of S.lines[S.cur] || []) {
     const r = l.rect;
     if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) {
-      if ((S.objs[S.cur] || []).some((o) => o.rm && !o.deleted && Math.abs(o.rm.y - l.f) < 0.6 && l.e < o.rm.x1 && l.x1 > o.rm.x0)) continue;
+      if (lineCovered(l)) continue;
       return l;
     }
   }
@@ -604,7 +608,10 @@ function sampleColors(r, src = cv, k = S.canvasScale) {
 }
 
 // Rendu de la page en haute définition (~288 ppi) pour analyser les lettres d'une image : l'écran, lui, est trop grossier.
-async function hiRes() {
+async function hiRes(tries = 0) {
+  try { return await hiResOnce(); } catch (e) { if (cancelled(e) && tries < 3) { await new Promise((r) => setTimeout(r, 150)); return hiRes(tries + 1); } throw e; }
+}
+async function hiResOnce() {
   const pi = S.cur;
   if (S.hi && S.hi.pi === pi && S.hi.sig === S.baseSig) return S.hi;
   const page = await S.pdf.getPage(pi + 1), pg = S.pages[pi];
@@ -631,11 +638,12 @@ function inkBand(l, pt, cv, k) {
   const w = Math.min(cv.width - x0, Math.ceil((l.rect.w + size * 3) * k)), hh = Math.min(cv.height - y0, Math.ceil(size * 2.2 * k));
   if (w < 4 || hh < 4) return null;
   const d = ctx.getImageData(x0, y0, w, hh).data;
-  const bg = hexRgb(sampleColors({ x: x0 / k, y: y0 / k, w: w / k, h: hh / k }, cv, k).bg);
+  const bg = hexRgb(ringBg(l.rect, cv, k) || sampleColors({ x: x0 / k, y: y0 / k, w: w / k, h: hh / k }, cv, k).bg); // fond local (autour de la ligne OCR), pas celui de toute la fenêtre
   const ink = (i, j) => { const q = (j * w + i) * 4; return (d[q] - bg[0]) ** 2 + (d[q + 1] - bg[1]) ** 2 + (d[q + 2] - bg[2]) ** 2 > 4000; };
   const row = new Array(hh).fill(0);
   // seules les colonnes de la ligne OCR comptent (± marge) : les filets et cadres voisins ne doivent pas fausser la bande
-  const lo = Math.max(0, Math.floor((l.rect.x - 0.03 * l.rect.w) * k - x0)), hi = Math.min(w - 1, Math.ceil((l.rect.x + 1.03 * l.rect.w) * k - x0));
+  const mg = Math.max(1, 0.008 * l.rect.w); // marge (pt) autour de l'étendue donnée par l'OCR : on n'y inclut ni puces ni filets voisins
+  const lo = Math.max(0, Math.floor((l.rect.x - mg) * k - x0)), hi = Math.min(w - 1, Math.ceil((l.rect.x + l.rect.w + mg) * k - x0));
   for (let j = 0; j < hh; j++) for (let i = lo; i <= hi; i++) if (ink(i, j)) row[j]++;
   const cy = Math.round(pt.y * k) - y0;
   let r = -1;
@@ -655,15 +663,19 @@ function inkBand(l, pt, cv, k) {
   if (c < 0) return null;
   const gap = Math.max(4, 0.6 * (r1 - r0));
   let c0 = c, c1 = c, miss = 0;
-  for (let i = c; i >= 0; i--) { if (col[i] > 0) { c0 = i; miss = 0; } else if (++miss > gap && i < lo) break; else if (i < lo - gap) break; }
-  miss = 0;
-  for (let i = c; i < w; i++) { if (col[i] > 0) { c1 = i; miss = 0; } else if (++miss > gap && i > hi) break; else if (i > hi + gap) break; }
+  for (let i = c; i >= lo; i--) if (col[i] > 0) c0 = i;
+  for (let i = c; i <= hi; i++) if (col[i] > 0) c1 = i;
   const rect = { x: (x0 + c0) / k, y: (y0 + r0) / k, w: (c1 - c0 + 1) / k, h: (r1 - r0 + 1) / k };
   // silhouette de l'encre (alpha = encre) pour la reconnaissance de police ; trous entre les mots
   const mw = c1 - c0 + 1, mh = r1 - r0 + 1;
   const mask = document.createElement('canvas'); mask.width = mw; mask.height = mh;
   const mctx = mask.getContext('2d'), img = mctx.createImageData(mw, mh);
-  for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) if (ink(c0 + i, r0 + j)) img.data[(j * mw + i) * 4 + 3] = 255;
+  // seuil à mi-contraste : l'épaisseur des traits (donc la graisse) n'est ni gonflée ni amincie par l'anti-crénelage
+  const dists = [];
+  for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) { const q = ((r0 + j) * w + c0 + i) * 4; dists.push((d[q] - bg[0]) ** 2 + (d[q + 1] - bg[1]) ** 2 + (d[q + 2] - bg[2]) ** 2); }
+  const sorted = Float64Array.from(dists).sort();
+  const fgD = sorted[Math.floor(sorted.length * 0.985)] || 4000, thr = Math.max(1500, 0.25 * fgD);
+  for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) if (dists[j * mw + i] > thr) img.data[(j * mw + i) * 4 + 3] = 255;
   mctx.putImageData(img, 0, 0);
   const gaps = [];
   for (let i = c0; i <= c1;) { if (col[i] > 0) { i++; continue; } let e = i; while (e <= c1 && col[e] === 0) e++; if (i > c0 && e <= c1) gaps.push({ a: i - c0, b: e - c0 }); i = e; }
@@ -689,6 +701,12 @@ function ringBg(r, src, k) {
   return '#' + [best.r, best.g, best.b].map((v) => Math.round(v / best.n).toString(16).padStart(2, '0')).join('');
 }
 async function startEditLine(l, pt) {
+  const r = await analyzeLine(l, pt);
+  S.objs[S.cur].push(r.o);
+  scheduleRebuild();
+  startEdit(r.o);
+}
+async function analyzeLine(l, pt, opt = {}) {
   const vp = S.pages[S.cur].vp;
   let ink = null;
   if (pt && isInvisibleLine(l)) { const hr = await hiRes(); ink = inkBand(l, pt, hr.cv, hr.k); }
@@ -709,9 +727,9 @@ async function startEditLine(l, pt) {
   let fit = null; // résultat de la reconnaissance : corps, interlettrage, ligne de base
   if (invisible) {
     try {
-      fit = await identify(ink.mask, l.str, { words: spans, prefer: (S.libVotes || []).filter((v) => Math.abs(v.h - ink.rect.h) < 0.15 * ink.rect.h).map((v) => v.id) });
+      fit = await identify(ink.mask, l.str, { words: spans, force: opt.force, prefer: (S.libVotes || []).filter((v) => Math.abs(v.h - ink.rect.h) < 0.15 * ink.rect.h).map((v) => v.id), families: [...new Set((S.libVotes || []).filter((v) => v.iou >= 0.78).map((v) => v.family))] });
       S.lastFit = fit && { ...fit, wordFonts: fit.wordFonts && fit.wordFonts.map((c) => c && c.id), ranked: fit.ranked.map((r) => [r.c.id, +r.iou.toFixed(3), +(r.ls / r.size).toFixed(3), +r.score.toFixed(3)]), c: fit.c.id };
-      if (fit && fit.iou > 0.35) { font = { fam: await ensureLibFont(fit.c), b: false, i: false }; (S.libVotes = S.libVotes || []).push({ id: fit.c.id, h: ink.rect.h }); } else fit = null;
+      if (fit && fit.iou > 0.35) { font = { fam: await ensureLibFont(fit.c), b: false, i: false }; (S.libVotes = S.libVotes || []).push({ id: fit.c.id, family: fit.c.family, h: ink.rect.h, iou: fit.iou }); } else fit = null;
     } catch (e) { console.warn('reconnaissance de police impossible', e); fit = null; }
   }
   const area = ink ? ink.rect : l.rect; // zone réellement occupée par les lettres visibles
@@ -779,10 +797,9 @@ async function startEditLine(l, pt) {
   if (paras) o.paras = paras;
   normalize(o);
   o.x = (ink ? area.x - (fit ? fit.lsb / ink.k : 0) : l.dx) - PAD; // l'origine du texte précède l'encre de la marge gauche de la 1re lettre
-  o.y = (ink ? area.y + (fit ? fit.baseOff / ink.k : 0.72 * l.size) : l.base) - layout(o).lines[0].base;
-  S.objs[S.cur].push(o);
-  scheduleRebuild();
-  startEdit(o);
+  const baseY = ink ? area.y + (fit ? fit.baseOff / ink.k : 0.72 * l.size) : l.base;
+  o.y = baseY - layout(o).lines[0].base;
+  return { o, ink, fit, l, baseY, area, fam: font.fam };
 }
 function fontObjOf(fontName) {
   try { const p = S.pageProxy; if (p && p.commonObjs.has(fontName)) return p.commonObjs.get(fontName); } catch (e) { /* */ }
@@ -803,13 +820,28 @@ function collectEdits(pi) {
         moves.push({ idx: o.idx, bbox: [Math.min(a[0], b[0]), Math.min(a[1], b[1]), Math.max(a[0], b[0]), Math.max(a[1], b[1])] });
       }
     } else if (o.rm) regions.push({ id: o.id, ...o.rm });
+    else if (o.rms) o.rms.forEach((r, i) => regions.push({ id: o.id + '#' + i, ...r }));
   }
   return { moves, regions };
 }
+const bgActive = (pi) => !!(S.bgFix[pi] && (S.objs[pi] || []).some((o) => S.bgFix[pi].ids.includes(o.id)));
 function editSig() {
-  return JSON.stringify(S.objs.map((_, pi) => { const e = collectEdits(pi); return [e.moves, e.regions.map((r) => [r.id, r.x0, r.x1, r.y, r.size])]; }));
+  return JSON.stringify(S.objs.map((_, pi) => { const e = collectEdits(pi); return [e.moves, e.regions.map((r) => [r.id, r.x0, r.x1, r.y, r.size]), bgActive(pi) ? S.bgFix[pi].v : 0]; }));
 }
 
+// Remplace l'image de fond de la page (même nom de ressource) par la version sans texte, sans toucher aux autres pages.
+async function replaceBackground(doc, page, bf) {
+  const res = page.node.Resources();
+  const xd = res && res.lookup(PDFName.of('XObject'), PDFDict);
+  if (!xd) return;
+  const emb = await doc.embedJpg(bf.bytes);
+  const nxd = doc.context.obj({}), nres = doc.context.obj({});
+  for (const [k, v] of xd.entries()) nxd.set(k, v);
+  nxd.set(PDFName.of(bf.name), emb.ref);
+  for (const [k, v] of res.entries()) nres.set(k, v);
+  nres.set(PDFName.of('XObject'), nxd);
+  page.node.set(PDFName.of('Resources'), nres);
+}
 async function buildPdf(draw) {
   const doc = await PDFDocument.load(S.origBytes, { updateMetadata: false });
   doc.registerFontkit(fontkit);
@@ -829,7 +861,7 @@ async function buildPdf(draw) {
     const arr = S.objs[pi] || [];
     const edits = collectEdits(pi);
     const drawables = draw ? arr.filter((o) => !o.deleted && (o.type === 'rect' || o.type === 'ellipse' || o.type === 'image' || o.type === 'text' || o.type === 'field')) : [];
-    if (!edits.moves.length && !edits.regions.length && !drawables.length) continue;
+    if (!edits.moves.length && !edits.regions.length && !drawables.length && !bgActive(pi)) continue;
     const an = await getAnalysis(pi);
     const page = pages[pi];
     if (an.src !== undefined && (an.src || edits.moves.length || edits.regions.length)) {
@@ -837,6 +869,7 @@ async function buildPdf(draw) {
       E.writeContents(doc, page, res.bytes);
       Object.assign(removed, res.removed);
     }
+    if (bgActive(pi)) await replaceBackground(doc, page, S.bgFix[pi]);
     const vp = S.pages[pi].vp, rot = vp.rotation || 0;
     const P = (x, y) => vp.convertToPdfPoint(x, y);
     const rectBox = (x, y, w, hh) => {
@@ -964,7 +997,11 @@ function rebuildMasksOnly() {
 /* =====================================================================
    Rendu de la page, vignettes, zoom
    ===================================================================== */
-async function renderCanvas() {
+const cancelled = (e) => e && (e.name === 'RenderingCancelledException' || /destroyed|cancelled/i.test(e.message || ''));
+async function renderCanvas(tries = 0) {
+  try { await renderCanvasOnce(); } catch (e) { if (cancelled(e) && tries < 3) { await new Promise((r) => setTimeout(r, 150)); return renderCanvas(tries + 1); } throw e; }
+}
+async function renderCanvasOnce() {
   const seq = ++S.renderSeq;
   const page = await S.pdf.getPage(S.cur + 1);
   const pg = S.pages[S.cur];
@@ -1023,6 +1060,176 @@ function markThumb() {
   document.querySelectorAll('.th').forEach((n) => n.classList.toggle('on', +n.dataset.i === S.cur));
   const t = $(`.th[data-i="${S.cur}"]`); if (t) t.scrollIntoView({ block: 'nearest' });
 }
+/* =====================================================================
+   Import d'une page : reconstitution du texte d'une page « image + couche OCR »
+   (polices, couleurs, paragraphes) et effacement du texte dans l'image de fond
+   ===================================================================== */
+const OK_OPS = new Set(['q', 'Q', 'cm', 'Do', 'BT', 'ET', 'Tf', 'Tz', 'Tm', 'Tj', 'TJ', 'Tr', 'BDC', 'EMC', 'BMC', 'Td', 'TD', 'T*', 'Tc', 'Tw', 'TL', 'gs', 'g', 'G', 'rg', 'RG', 'k', 'K', 'MP', 'DP']);
+function pageImage(an, pi) { // page = une seule image plein cadre + du texte : on peut en refaire l'image sans texte
+  if (!an.ops) return null;
+  for (const op of an.ops) if (!OK_OPS.has(op)) return null;
+  const imgs = an.placements.filter((p) => p.kind === 'image');
+  if (imgs.length !== 1) return null;
+  const b = imgs[0].bbox, pg = S.pages[pi];
+  return (b[2] - b[0]) * (b[3] - b[1]) >= 0.85 * pg.w * pg.h ? imgs[0] : null;
+}
+const nearColor = (p, q) => { const [r1, g1, b1] = hexRgb(p), [r2, g2, b2] = hexRgb(q); return (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2 < 2400; };
+
+// Efface l'encre : pixels du masque (dilaté) remplacés par interpolation verticale entre le fond au-dessus et au-dessous.
+function eraseInk(cv, items) {
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  for (const it of items) {
+    const mw = it.mask.width, mh = it.mask.height, r = Math.max(2, Math.round(mh * 0.05)), pad = r + 4;
+    const x0 = Math.max(0, it.px - pad), y0 = Math.max(0, it.py - pad);
+    const W = Math.min(cv.width, it.px + mw + pad) - x0, H = Math.min(cv.height, it.py + mh + pad) - y0;
+    if (W < 2 || H < 2) continue;
+    const img = ctx.getImageData(x0, y0, W, H), d = img.data;
+    const md = it.mask.getContext('2d').getImageData(0, 0, mw, mh).data;
+    let M = new Uint8Array(W * H);
+    for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) if (md[(j * mw + i) * 4 + 3]) { const X = i + it.px - x0, Y = j + it.py - y0; if (X >= 0 && X < W && Y >= 0 && Y < H) M[Y * W + X] = 1; }
+    const dil = (src, horiz) => { // dilatation séparable (rayon r)
+      const out = new Uint8Array(W * H);
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        if (!src[y * W + x]) continue;
+        if (horiz) for (let k = Math.max(0, x - r); k <= Math.min(W - 1, x + r); k++) out[y * W + k] = 1;
+        else for (let k = Math.max(0, y - r); k <= Math.min(H - 1, y + r); k++) out[k * W + x] = 1;
+      }
+      return out;
+    };
+    M = dil(dil(M, true), false);
+    const at = (x, y) => { const q = (y * W + x) * 4; return [d[q], d[q + 1], d[q + 2]]; };
+    for (let x = 0; x < W; x++) {
+      for (let y = 0; y < H;) {
+        if (!M[y * W + x]) { y++; continue; }
+        let e = y; while (e < H && M[e * W + x]) e++;
+        const a = y - 1, b = e; // dernières lignes de fond au-dessus / au-dessous
+        const ca = a >= 0 ? at(x, a) : null, cb = b < H ? at(x, b) : null;
+        for (let t = y; t < e; t++) {
+          const f = (t - a) / (b - a), q = (t * W + x) * 4;
+          const c = ca && cb ? [0, 1, 2].map((i) => ca[i] + (cb[i] - ca[i]) * f) : (ca || cb);
+          if (c) { d[q] = c[0]; d[q + 1] = c[1]; d[q + 2] = c[2]; }
+        }
+        y = e;
+      }
+    }
+    ctx.putImageData(img, x0, y0);
+  }
+}
+
+// Regroupe les lignes en paragraphes (même police, même corps, même marge gauche, interligne régulier)
+function groupBlocks(drafts) {
+  drafts.sort((a, b) => a.baseY - b.baseY || a.area.x - b.area.x);
+  const blocks = [];
+  for (const d of drafts) {
+    let tgt = null;
+    for (const b of blocks) {
+      const L = b.lines[b.lines.length - 1], sz = d.o.size, gap = d.baseY - L.baseY;
+      if (d.fam === L.fam && Math.abs(sz - L.o.size) < 0.06 * sz && Math.abs(d.area.x - b.lines[0].area.x) < 0.6 * sz && gap > 1.05 * sz && gap < 2.2 * sz &&
+        Math.abs((d.o.ls || 0) - (L.o.ls || 0)) < 0.02 && L.area.w >= 0.7 * b.maxW && d.area.w <= b.maxW * 1.03 && nearColor(L.o.color, d.o.color)) { tgt = b; break; }
+    }
+    if (tgt) { tgt.lines.push(d); tgt.maxW = Math.max(tgt.maxW, d.area.w); } else blocks.push({ lines: [d], maxW: d.area.w });
+  }
+  return blocks;
+}
+function singleObj(d, masked) {
+  const o = d.o;
+  o.rms = [o.rm]; delete o.rm;
+  if (masked) { o.maskNeeded = true; o.forceMask = true; o.rm = o.rms[0]; delete o.rms; } else { o.maskNeeded = false; delete o.forceMask; }
+  return o;
+}
+// Un paragraphe = un seul objet texte, largeur fixe : le texte se réorganise dans son bloc ; on vérifie que les retours à la ligne d'origine sont retrouvés.
+function blockObjects(b) {
+  if (b.lines.length === 1) return [singleObj(b.lines[0], false)];
+  const first = b.lines[0], o0 = first.o;
+  const runs = [];
+  b.lines.forEach((d, i) => {
+    if (i > 0 && runs.length && !/\s$/.test(runs[runs.length - 1].t)) runs[runs.length - 1].t += ' ';
+    for (const r of getParas(d.o)[0].runs) {
+      const c = r.c ?? d.o.color, f = r.f ?? d.o.font.fam, last = runs[runs.length - 1];
+      if (last && nearColor(last.c, c) && last.f === f) last.t += r.t; else runs.push({ t: r.t, c, f });
+    }
+  });
+  const base = runs[0].c;
+  const paras = [{ runs: runs.map((r) => { const q = { t: r.t }; if (!nearColor(r.c, base)) q.c = r.c; if (r.f !== o0.font.fam) q.f = r.f; return q; }) }];
+  const gaps = b.lines.slice(1).map((d, i) => (d.baseY - b.lines[i].baseY) / o0.size);
+  const lh = Math.round((gaps.reduce((a, c) => a + c, 0) / gaps.length) * 100) / 100;
+  const want = b.lines.map((d) => d.l.str.replace(/\s+/g, ' ').trim());
+  const obj = { ...o0, id: uid('o'), paras, text: plainOf(paras), orig: plainOf(paras), color: base, lh, autoW: false, dirty: false };
+  delete obj.rm; delete obj.forceMask; obj.maskNeeded = false;
+  obj.rms = b.lines.map((d) => d.o.rm);
+  for (const slack of [0, 0.01, 0.02, 0.035, 0.05, -0.012, -0.025]) {
+    obj.w = b.maxW * (1 + slack) + 2 * PAD;
+    const L = layout(obj), got = L.lines.map((ln) => ln.items.map((i) => i.text).join('').replace(/\s+/g, ' ').trim());
+    if (got.length === want.length && got.every((t, i) => t === want[i])) {
+      normalize(obj);
+      obj.y = first.baseY - layout(obj).lines[0].base;
+      return [obj];
+    }
+  }
+  return b.lines.map((d) => singleObj(d, false)); // retours à la ligne non reproductibles : une ligne = un objet
+}
+
+async function importPage(pi, manual) {
+  if (S.importing || !S.pdf || S.pages[pi].vp.rotation) return;
+  S.importing = true; $('#busy').hidden = false;
+  try {
+    const an = await getAnalysis(pi);
+    const lines = (S.lines[pi] || []).filter((l) => isInvisibleLine(l) && !lineCovered(l));
+    if (!lines.length) { if (manual) toast('Aucun texte à reconstituer sur cette page.'); return; }
+    const img = pageImage(an, pi);
+    await hiRes();
+    const drafts = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i];
+      toast(`Analyse de la page : ligne ${i + 1} sur ${lines.length}…`, 60000);
+      await new Promise((r) => setTimeout(r, 0));
+      try { const d = await analyzeLine(l, { x: l.rect.x + l.rect.w * 0.3, y: l.rect.y + l.rect.h * 0.55 }); if (d.ink) drafts.push(d); } catch (e) { console.warn('ligne ignorée', e); }
+      if (S.cur !== pi) return;
+    }
+    if (!drafts.length) { if (manual) toast('Aucune ligne reconnue.'); return; }
+    // cohérence de style : les lignes de même corps et de même couleur partagent la police dominante (vote pondéré par la longueur et la qualité de l'ajustement)
+    const used = new Set();
+    for (const d of drafts) {
+      if (!d.fit || used.has(d)) continue;
+      const cl = drafts.filter((e) => e.fit && Math.abs(e.o.size - d.o.size) < 0.06 * d.o.size && nearColor(e.o.color, d.o.color));
+      const vote = {};
+      for (const e of cl) { used.add(e); vote[e.fit.c.id] = (vote[e.fit.c.id] || 0) + e.l.str.length * e.fit.iou ** 2; }
+      const lead = Object.entries(vote).sort((a, b) => b[1] - a[1])[0][0];
+      for (const e of cl) {
+        if (e.fit.c.id === lead) continue;
+        try {
+          const d2 = await analyzeLine(e.l, { x: e.l.rect.x + e.l.rect.w * 0.3, y: e.l.rect.y + e.l.rect.h * 0.55 }, { force: lead });
+          if (d2.ink && d2.fit && d2.fit.c.id === lead) drafts[drafts.indexOf(e)] = d2;
+        } catch (err) { /* on garde la première analyse */ }
+      }
+    }
+    let objs;
+    if (img) objs = groupBlocks(drafts.slice()).flatMap(blockObjects);
+    else objs = drafts.map((d) => singleObj(d, true)); // page mêlant image et dessins : on masque ligne par ligne
+    S.objs[pi].push(...objs);
+    if (img) {
+      const hr = S.hi, cv2 = document.createElement('canvas');
+      cv2.width = hr.cv.width; cv2.height = hr.cv.height;
+      cv2.getContext('2d').drawImage(hr.cv, 0, 0);
+      eraseInk(cv2, drafts.map((d) => ({ mask: d.ink.mask, px: Math.round(d.ink.rect.x * d.ink.k), py: Math.round(d.ink.rect.y * d.ink.k) })));
+      const blob = await new Promise((r) => cv2.toBlob(r, 'image/jpeg', 0.92));
+      S.bgFix[pi] = { name: img.name, bytes: new Uint8Array(await blob.arrayBuffer()), ids: objs.map((o) => o.id), v: ((S.bgFix[pi] && S.bgFix[pi].v) || 0) + 1 };
+    }
+    S.hi = null;
+    commit();
+    if (S.cur === pi) drawStage();
+    const nb = objs.length;
+    toast(`Page analysée : ${drafts.length} lignes reconnues, ${nb} blocs de texte modifiables.`, 5000);
+  } catch (e) { console.error(e); toast('Analyse de la page impossible : ' + e.message, 6000); }
+  S.importing = false; $('#busy').hidden = true;
+}
+function maybeImport(manual) {
+  const pi = S.cur;
+  if (!manual && S.imported[pi]) return;
+  S.imported[pi] = true;
+  importPage(pi, manual);
+}
+
 async function gotoPage(i) {
   if (i < 0 || i >= S.pages.length) return;
   endEdit(true);
@@ -1033,6 +1240,7 @@ async function gotoPage(i) {
   await renderCanvas();
   await computeLines();
   drawStage(); renderProps(); markThumb(); updateTop();
+  maybeImport();
 }
 
 /* =====================================================================
@@ -1049,7 +1257,7 @@ async function openBytes(bytes, name) {
     Object.assign(S, {
       task,
       name, origBytes: bytes, origDoc, pdf, cur: 0, objs: [], analysis: [], lines: [], sel: null, editing: null,
-      undo: [], redo: [], baseSig: '', modified: false, pages: [],
+      undo: [], redo: [], baseSig: '', modified: false, pages: [], bgFix: [], imported: [],
     });
     for (let i = 0; i < pdf.numPages; i++) {
       const p = await pdf.getPage(i + 1);
@@ -1067,6 +1275,7 @@ async function openBytes(bytes, name) {
     drawStage(); renderProps(); updateTop();
     buildThumbs().then(markThumb);
     setTool('text');
+    maybeImport();
   } catch (e) {
     console.error(e);
     toast(/encrypt/i.test(e.message) ? 'Ce PDF est protégé par mot de passe : il ne peut pas être modifié ici.' : 'Impossible d\'ouvrir ce PDF : ' + e.message, 6000);
@@ -1638,4 +1847,5 @@ window.addEventListener('resize', () => { if (S.pdf) updateSel(); });
 // pdf.js : le worker est intégré au bundle (globalThis.pdfjsWorker) : aucune ressource externe.
 initMeasure().then(() => { window.__pdfEditor.ready = true; });
 renderProps(); updateTop();
-Object.assign(window.__pdfEditor, { openBytes, save, buildPdf, setTool, gotoPage, startEditLine, lineAt });
+$('#btnImport').onclick = () => maybeImport(true);
+Object.assign(window.__pdfEditor, { openBytes, save, buildPdf, setTool, gotoPage, startEditLine, lineAt, importPage, maybeImport, inkBand, hiRes, isInvisibleLine });
