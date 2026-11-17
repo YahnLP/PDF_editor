@@ -594,28 +594,85 @@ function sampleColors(r) {
   return { bg: hex(bg), fg: dist(fg) < 600 ? '#000000' : hex(fg) };
 }
 
-async function startEditLine(l) {
-  const emb = await embeddedFontFor(l.fontName);
-  const font = emb ? { fam: emb, b: false, i: false } : guessFont(l.rawName || fontNameOf(l.fontName), fontObjOf(l.fontName));
-  const cols = sampleColors(l.rect);
-  // couleurs par portion (ex. un mot en orange dans un titre sombre)
+// Texte invisible (rendu 3 : couche OCR) ou police « Glyphless » : le texte affiché est une image ou un tracé.
+function isInvisibleLine(l) {
+  if (/glyphless/i.test(fontNameOf(l.fontName))) return true;
+  const an = S.analysis[S.cur];
+  if (!an || !an.shows) return false;
+  const tolY = Math.max(1.5, 0.22 * l.size);
+  const hit = an.shows.filter((sh) => sh.head && sh.pos && sh.pos[0] >= l.e - 2 && sh.pos[0] <= l.x1 + 2 && Math.abs(sh.pos[1] - l.f) <= tolY);
+  return hit.length > 0 && hit.every((sh) => sh.tr === 3);
+}
+// Cherche, sur l'image de la page, la ligne de lettres réellement visible sous le clic (indépendamment de la couche texte).
+function inkBand(l, pt) {
+  const k = S.canvasScale, ctx = cv.getContext('2d'), size = l.size;
+  const x0 = Math.max(0, Math.floor((l.rect.x - size) * k)), y0 = Math.max(0, Math.floor((pt.y - size * 1.1) * k));
+  const w = Math.min(cv.width - x0, Math.ceil((l.rect.w + size * 3) * k)), hh = Math.min(cv.height - y0, Math.ceil(size * 2.2 * k));
+  if (w < 4 || hh < 4) return null;
+  const d = ctx.getImageData(x0, y0, w, hh).data;
+  const bg = hexRgb(sampleColors({ x: x0 / k, y: y0 / k, w: w / k, h: hh / k }).bg);
+  const ink = (i, j) => { const q = (j * w + i) * 4; return (d[q] - bg[0]) ** 2 + (d[q + 1] - bg[1]) ** 2 + (d[q + 2] - bg[2]) ** 2 > 4000; };
+  const row = new Array(hh).fill(0);
+  for (let j = 0; j < hh; j++) for (let i = 0; i < w; i++) if (ink(i, j)) row[j]++;
+  const cy = Math.round(pt.y * k) - y0;
+  let r = -1;
+  for (let dj = 0; dj < hh && r < 0; dj++) for (const j of [cy + dj, cy - dj]) if (j >= 0 && j < hh && row[j] >= 2) { r = j; break; }
+  if (r < 0) return null;
+  const maxH = 1.7 * size * k;
+  let r0 = r, r1 = r;
+  const live = (j) => (row[j] >= 1) || (row[j - 1] >= 1) || (row[j + 1] >= 1);
+  while (r0 > 0 && live(r0 - 1) && r1 - r0 < maxH) r0--;
+  while (r1 < hh - 1 && live(r1 + 1) && r1 - r0 < maxH) r1++;
+  const col = new Array(w).fill(0);
+  let n = 0;
+  for (let j = r0; j <= r1; j++) for (let i = 0; i < w; i++) if (ink(i, j)) { col[i]++; n++; }
+  const cx = Math.round(pt.x * k) - x0;
+  let c = -1;
+  for (let di = 0; di < w && c < 0; di++) for (const i of [cx + di, cx - di]) if (i >= 0 && i < w && col[i] > 0) { c = i; break; }
+  if (c < 0) return null;
+  const gap = Math.max(4, 0.6 * (r1 - r0));
+  let c0 = c, c1 = c, miss = 0;
+  for (let i = c; i >= 0; i--) { if (col[i] > 0) { c0 = i; miss = 0; } else if (++miss > gap) break; }
+  miss = 0;
+  for (let i = c; i < w; i++) { if (col[i] > 0) { c1 = i; miss = 0; } else if (++miss > gap) break; }
+  const rect = { x: (x0 + c0) / k, y: (y0 + r0) / k, w: (c1 - c0 + 1) / k, h: (r1 - r0 + 1) / k };
+  return { rect, density: n / Math.max(1, (c1 - c0 + 1) * (r1 - r0 + 1)) };
+}
+
+async function startEditLine(l, pt) {
   const vp = S.pages[S.cur].vp;
+  let ink = null;
+  if (pt && isInvisibleLine(l)) ink = inkBand(l, pt);
+  const invisible = !!ink;
+  const emb = invisible ? null : await embeddedFontFor(l.fontName);
+  let font = emb ? { fam: emb, b: false, i: false } : guessFont(l.rawName || fontNameOf(l.fontName), fontObjOf(l.fontName));
+  if (invisible && ink.density > 0.28) font = { ...font, b: true };
+  const area = ink ? ink.rect : l.rect; // zone réellement occupée par les lettres visibles
+  const cols = sampleColors(area);
+  // couleurs par portion (ex. un mot en orange dans un titre sombre) : positions en px de scène
   let paras = null, color = cols.fg;
   const toks = [];
-  for (const pt of l.parts || [{ str: l.str, e: l.e, x1: l.x1 }]) {
-    const raw = [...pt.str.matchAll(/\S+|\s+/g)].map((m) => m[0]);
-    const ws = raw.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text));
-    const tot = ws.reduce((a, c) => a + c, 0) || 1, k = (pt.x1 - pt.e) / tot;
-    let x = pt.e;
-    raw.forEach((t, i) => { toks.push({ t, x0: x, x1: x + ws[i] * k, sp: /^\s/.test(t) }); x += ws[i] * k; });
+  const parts = l.parts || [{ str: l.str, e: l.e, x1: l.x1 }];
+  const raws = parts.map((pt2) => [...pt2.str.matchAll(/\S+|\s+/g)].map((m) => m[0]));
+  if (ink) { // positions réparties proportionnellement aux largeurs de la police sur la largeur visible
+    const all = raws.flat(), ws = all.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text)), tot = ws.reduce((a, c) => a + c, 0) || 1;
+    let x = area.x;
+    all.forEach((t, i) => { const w = (ws[i] / tot) * area.w; toks.push({ t, x0: x, x1: x + w, sp: /^\s/.test(t) }); x += w; });
+  } else {
+    parts.forEach((pt2, pi) => {
+      const raw = raws[pi], ws = raw.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text));
+      const tot = ws.reduce((a, c) => a + c, 0) || 1, k = (pt2.x1 - pt2.e) / tot;
+      let x = pt2.e;
+      raw.forEach((t, i) => {
+        const a = vp.convertToViewportPoint(x, l.f), b = vp.convertToViewportPoint(x + ws[i] * k, l.f);
+        toks.push({ t, x0: Math.min(a[0], b[0]), x1: Math.max(a[0], b[0]), sp: /^\s/.test(t) });
+        x += ws[i] * k;
+      });
+    });
   }
   if (toks.filter((t) => !t.sp).length > 1) {
     let prev = cols.fg;
-    const cs = toks.map((t) => {
-      if (t.sp) return prev;
-      const a = vp.convertToViewportPoint(t.x0, l.f), b = vp.convertToViewportPoint(t.x1, l.f);
-      return (prev = sampleColors({ x: Math.min(a[0], b[0]), y: l.rect.y, w: Math.abs(b[0] - a[0]), h: l.rect.h }).fg);
-    });
+    const cs = toks.map((t) => (t.sp ? prev : (prev = sampleColors({ x: t.x0, y: area.y, w: t.x1 - t.x0, h: area.h }).fg)));
     const near = (p, q) => { const [r1, g1, b1] = hexRgb(p), [r2, g2, b2] = hexRgb(q); return (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2 < 2400; };
     const runs = [];
     toks.forEach((t, i) => { const last = runs[runs.length - 1]; if (last && near(last.c, cs[i])) last.t += t.t; else runs.push({ t: t.t, c: cs[i] }); });
@@ -624,15 +681,17 @@ async function startEditLine(l) {
       paras = [{ runs: runs.map((r, i) => (i === 0 ? { t: r.t } : { t: r.t, c: r.c })) }];
     }
   }
+  const pad = ink ? 2 : 0.5;
   const o = {
     id: uid('o'), type: 'text', x: 0, y: 0, w: 10, h: 10, text: l.str, orig: l.str, font, size: r1(l.size * 100) / 100,
     color, align: 'left', lh: 1.2, autoW: true, fill: null, stroke: null, sw: 0, dirty: false,
-    rm: { x0: l.e, x1: l.x1, y: l.f, size: l.size, bg: cols.bg, disp: { x: l.rect.x - 0.5, y: l.rect.y, w: l.rect.w + 1, h: l.rect.h } },
-    maskNeeded: true,
+    rm: { x0: l.e, x1: l.x1, y: l.f, size: l.size, bg: cols.bg, disp: { x: area.x - pad, y: area.y - (ink ? pad : 0), w: area.w + 2 * pad, h: area.h + (ink ? 2 * pad : 0) } },
+    maskNeeded: true, forceMask: invisible,
   };
   if (paras) o.paras = paras;
   normalize(o);
-  o.x = l.dx - PAD; o.y = l.base - layout(o).lines[0].base;
+  o.x = (ink ? area.x : l.dx) - PAD;
+  o.y = (ink ? area.y + 0.72 * l.size : l.base) - layout(o).lines[0].base; // les majuscules montent à ~72 % du corps
   S.objs[S.cur].push(o);
   scheduleRebuild();
   startEdit(o);
@@ -779,7 +838,7 @@ async function rebuildBase(force) {
   try {
     const { bytes, removed } = await buildPdf(false);
     if (my !== S.rebuildSeq) return;
-    for (const arr of S.objs) for (const o of arr) if (o.rm && o.id in removed) o.maskNeeded = removed[o.id] === 0;
+    for (const arr of S.objs) for (const o of arr) if (o.rm && o.id in removed) o.maskNeeded = removed[o.id] === 0 || !!o.forceMask;
     const oldTask = S.task;
     const task = pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true });
     S.pdf = await task.promise; S.task = task;
@@ -999,7 +1058,7 @@ stage.addEventListener('pointerdown', (e) => {
     const o = hitObj(p.x, p.y);
     if (o && o.type === 'text') { select(o.id); startEdit(o); return; }
     const l = lineAt(p.x, p.y);
-    if (l) { startEditLine(l); return; }
+    if (l) { startEditLine(l, p); return; }
     select(null);
     drag = { kind: 'newtext', p0: p, moved: false };
     return;
@@ -1013,7 +1072,7 @@ stage.addEventListener('pointerdown', (e) => {
   const o = hitObj(p.x, p.y);
   if (!o) {
     const l = lineAt(p.x, p.y);
-    if (l) { startEditLine(l); return; }
+    if (l) { startEditLine(l, p); return; }
     select(null); return;
   }
   select(o.id);

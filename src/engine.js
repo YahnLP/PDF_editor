@@ -187,7 +187,7 @@ export function analyze(doc, page, pageSize) {
   let ctm = IDENT.slice();
   const stack = [];
   let operands = [];
-  let tm = IDENT.slice(), tlm = IDENT.slice(), leading = 0, fontSize = 0, cont = false, lastHead = -1;
+  let tm = IDENT.slice(), tlm = IDENT.slice(), leading = 0, fontSize = 0, cont = false, lastHead = -1, tr = 0;
   const placements = [];
   const shows = [];
   const pageArea = pageSize ? pageSize[0] * pageSize[1] : Infinity;
@@ -201,7 +201,7 @@ export function analyze(doc, page, pageSize) {
   const show = (tk, opKind, firstOperand) => {
     const s0 = firstOperand ? firstOperand.s : tk.s;
     const head = !cont;
-    const rec = { s: s0, e: tk.e, op: opKind, size: fontSize, head, pos: null, headIdx: -1 };
+    const rec = { s: s0, e: tk.e, op: opKind, size: fontSize, head, pos: null, headIdx: -1, tr };
     if (head) {
       const p = mul(tm, ctm);
       rec.pos = [p[4], p[5]];
@@ -229,6 +229,7 @@ export function analyze(doc, page, pageSize) {
       case 'BT': tm = IDENT.slice(); tlm = IDENT.slice(); cont = false; break;
       case 'Tf': fontSize = Number.isFinite(nums[1]) ? nums[1] : fontSize; break;
       case 'TL': if (Number.isFinite(nums[0])) leading = nums[0]; break;
+      case 'Tr': if (Number.isFinite(nums[0])) tr = nums[0]; break;
       case 'Td': if (nums.length >= 2) td(nums[0], nums[1]); break;
       case 'TD': if (nums.length >= 2) { leading = -nums[1]; td(nums[0], nums[1]); } break;
       case 'Tm': if (nums.length >= 6) { tm = nums.slice(-6); tlm = tm.slice(); cont = false; } break;
