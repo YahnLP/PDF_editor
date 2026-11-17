@@ -92,18 +92,45 @@ function safeF(spec, text) {
   return { text: out, bad };
 }
 const safeText = (o, text) => safeF(o.font, text);
+async function registerFont(bytes, name, extra) {
+  const kf = fontkit.create(bytes);
+  const id = uid('f');
+  const upm = kf.unitsPerEm || 1000;
+  const ff = new FontFace('cf_' + id, bytes);
+  await ff.load(); document.fonts.add(ff);
+  MF['f:' + id] = await measureDoc.embedFont(bytes, { subset: false });
+  S.fonts.push({ id, name: name || kf.fullName || kf.familyName, bytes, A: kf.ascent / upm, D: -kf.descent / upm, ...extra });
+  fillFontSelect();
+  return { id, kf };
+}
+// Police réellement intégrée au PDF (récupérée via pdf.js) : l'aperçu et l'export gardent la vraie forme des lettres.
+const embCache = new Map();
+async function embeddedFontFor(fontName) {
+  const f = fontObjOf(fontName);
+  if (!f || !f.data || f.missingFile || !f.data.length) return null;
+  let hsh = 0; for (let i = 0; i < f.data.length; i += 97) hsh = (hsh * 31 + f.data[i]) | 0;
+  const key = `${f.name}:${f.data.length}:${hsh}`; // loadedName change à chaque reconstruction de l'aperçu
+  if (embCache.has(key)) return embCache.get(key);
+  let res = null;
+  try {
+    const bytes = new Uint8Array(f.data);
+    const clean = (f.name || '').replace(/^[A-Z]{6}\+/, '');
+    const n = clean.toLowerCase();
+    const { id, kf } = await registerFont(bytes, clean + ' (PDF)', {
+      partial: true, serif: !!f.isSerifFont, mono: !!f.isMonospace,
+      bold: /bold|black|heavy|demi|semibold/.test(n) || !!f.bold, italic: /italic|oblique/.test(n) || !!f.italic,
+    });
+    S.fonts.find((x) => x.id === id).cs = new Set(kf.characterSet);
+    res = 'f:' + id;
+  } catch (e) { console.info('police du PDF non réutilisable :', e.message); }
+  embCache.set(key, res);
+  return res;
+}
 async function addFontFile(file) {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
-    const kf = fontkit.create(bytes);
-    const id = uid('f');
-    const upm = kf.unitsPerEm || 1000;
+    const { id, kf } = await registerFont(bytes, null, {});
     const name = kf.fullName || kf.familyName || file.name;
-    const ff = new FontFace('cf_' + id, bytes);
-    await ff.load(); document.fonts.add(ff);
-    MF['f:' + id] = await measureDoc.embedFont(bytes, { subset: false });
-    S.fonts.push({ id, name, bytes, A: kf.ascent / upm, D: -kf.descent / upm });
-    fillFontSelect();
     toast(`Police ajoutée : ${name}`);
     return 'f:' + id;
   } catch (e) {
@@ -121,6 +148,19 @@ const runStyle = (o, r) => ({ fam: r.f ?? o.font.fam, b: r.b ?? !!o.font.b, i: r
 const sameSt = (a, b) => a.fam === b.fam && a.b === b.b && a.i === b.i && a.u === b.u && a.c === b.c && a.sz === b.sz;
 const wOf = (st, text) => (MF[fkey(st)] || MF.helvetica).widthOfTextAtSize(text, st.sz);
 
+// Police extraite du PDF = sous-ensemble : les caractères absents passent dans une police standard de même graisse.
+function splitFallback(st, text) {
+  const cf = st.fam.startsWith('f:') ? S.fonts.find((x) => 'f:' + x.id === st.fam) : null;
+  if (!cf || !cf.partial) return [[text, st]];
+  const fb = { ...st, fam: cf.serif ? 'times' : cf.mono ? 'courier' : 'helvetica', b: cf.bold || st.b, i: cf.italic || st.i };
+  const out = [];
+  for (const ch of text) {
+    const st2 = cf.cs.has(ch.codePointAt(0)) ? st : fb, last = out[out.length - 1];
+    if (last && last[1] === st2) last[0] += ch; else out.push([ch, st2]);
+  }
+  return out;
+}
+
 // Mise en page partagée par l'aperçu et l'export : paragraphes, listes, retraits, styles par portion.
 function layout(o) {
   const paras = getParas(o), labels = listLabels(paras), lhm = o.lh || 1.2;
@@ -136,7 +176,9 @@ function layout(o) {
       const st = runStyle(o, r);
       r.t.split('\n').forEach((seg, si) => {
         if (si > 0) toks.push({ br: true });
-        for (const m of seg.matchAll(/\S+|\s+/g)) { const q = measure(st, m[0]); toks.push({ text: q.text, w: q.w, st, sp: /^\s/.test(m[0]) }); }
+        for (const m of seg.matchAll(/\S+|\s+/g)) {
+          for (const [piece, pst] of splitFallback(st, m[0])) { const q = measure(pst, piece); toks.push({ text: q.text, w: q.w, st: pst, sp: /^\s/.test(piece) }); }
+        }
       });
     }
     const rows = [];
@@ -501,11 +543,11 @@ async function computeLines() {
       if (last && last.fontName === it.fontName && Math.abs(last.size - size) < 0.2 && Math.abs(last.f - f) < 0.6) {
         const gap = e - last.x1;
         if (gap > -size * 0.3 && gap < size * 1.0) {
-          if (gap > size * 0.15 && !last.str.endsWith(' ') && !it.str.startsWith(' ')) last.str += ' ';
-          last.str += it.str; last.x1 = x1; continue;
+          if (gap > size * 0.15 && !last.str.endsWith(' ') && !it.str.startsWith(' ')) { last.str += ' '; last.parts[last.parts.length - 1].str += ' '; }
+          last.str += it.str; last.x1 = x1; last.parts.push({ str: it.str, e, x1 }); continue;
         }
       }
-      last = { str: it.str, e, f, x1, size, fontName: it.fontName };
+      last = { str: it.str, e, f, x1, size, fontName: it.fontName, parts: [{ str: it.str, e, x1 }] };
       lines.push(last);
     }
     S.lines[S.cur] = lines.filter((l) => l.str.trim()).map((l) => {
@@ -550,15 +592,43 @@ function sampleColors(r) {
   return { bg: hex(bg), fg: dist(fg) < 600 ? '#000000' : hex(fg) };
 }
 
-function startEditLine(l) {
-  const font = guessFont(l.rawName || fontNameOf(l.fontName), fontObjOf(l.fontName));
+async function startEditLine(l) {
+  const emb = await embeddedFontFor(l.fontName);
+  const font = emb ? { fam: emb, b: false, i: false } : guessFont(l.rawName || fontNameOf(l.fontName), fontObjOf(l.fontName));
   const cols = sampleColors(l.rect);
+  // couleurs par portion (ex. un mot en orange dans un titre sombre)
+  const vp = S.pages[S.cur].vp;
+  let paras = null, color = cols.fg;
+  const toks = [];
+  for (const pt of l.parts || [{ str: l.str, e: l.e, x1: l.x1 }]) {
+    const raw = [...pt.str.matchAll(/\S+|\s+/g)].map((m) => m[0]);
+    const ws = raw.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text));
+    const tot = ws.reduce((a, c) => a + c, 0) || 1, k = (pt.x1 - pt.e) / tot;
+    let x = pt.e;
+    raw.forEach((t, i) => { toks.push({ t, x0: x, x1: x + ws[i] * k, sp: /^\s/.test(t) }); x += ws[i] * k; });
+  }
+  if (toks.filter((t) => !t.sp).length > 1) {
+    let prev = cols.fg;
+    const cs = toks.map((t) => {
+      if (t.sp) return prev;
+      const a = vp.convertToViewportPoint(t.x0, l.f), b = vp.convertToViewportPoint(t.x1, l.f);
+      return (prev = sampleColors({ x: Math.min(a[0], b[0]), y: l.rect.y, w: Math.abs(b[0] - a[0]), h: l.rect.h }).fg);
+    });
+    const near = (p, q) => { const [r1, g1, b1] = hexRgb(p), [r2, g2, b2] = hexRgb(q); return (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2 < 2400; };
+    const runs = [];
+    toks.forEach((t, i) => { const last = runs[runs.length - 1]; if (last && near(last.c, cs[i])) last.t += t.t; else runs.push({ t: t.t, c: cs[i] }); });
+    if (runs.length > 1) {
+      color = runs[0].c;
+      paras = [{ runs: runs.map((r, i) => (i === 0 ? { t: r.t } : { t: r.t, c: r.c })) }];
+    }
+  }
   const o = {
     id: uid('o'), type: 'text', x: 0, y: 0, w: 10, h: 10, text: l.str, orig: l.str, font, size: r1(l.size * 100) / 100,
-    color: cols.fg, align: 'left', lh: 1.2, autoW: true, fill: null, stroke: null, sw: 0, dirty: false,
+    color, align: 'left', lh: 1.2, autoW: true, fill: null, stroke: null, sw: 0, dirty: false,
     rm: { x0: l.e, x1: l.x1, y: l.f, size: l.size, bg: cols.bg, disp: { x: l.rect.x - 0.5, y: l.rect.y, w: l.rect.w + 1, h: l.rect.h } },
     maskNeeded: true,
   };
+  if (paras) o.paras = paras;
   normalize(o);
   o.x = l.dx - PAD; o.y = l.base - layout(o).lines[0].base;
   S.objs[S.cur].push(o);
@@ -716,6 +786,10 @@ async function rebuildBase(force) {
     await renderCanvas();
     S.ghosts.clear();
     await computeLines();
+    // Contrôle : si pdf.js voit encore le texte d'origine à cet endroit, la suppression n'a pas agi → on masque.
+    for (const o of S.objs[S.cur] || []) {
+      if (o.rm && !o.maskNeeded && !o.deleted && (S.lines[S.cur] || []).some((l) => Math.abs(l.f - o.rm.y) < 0.6 && l.e < o.rm.x1 - 0.5 && l.x1 > o.rm.x0 + 0.5)) o.maskNeeded = true;
+    }
     if (!S.editing) drawStage(); else stage.querySelectorAll('.mask').forEach((n) => n.remove()), rebuildMasksOnly();
     renderThumb(S.cur);
   } catch (e) { console.error(e); toast('Erreur de mise à jour : ' + e.message); }
@@ -815,6 +889,7 @@ async function openBytes(bytes, name) {
     const task = pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true });
     const pdf = await task.promise;
     if (S.task) S.task.destroy();
+    embCache.clear(); S.fonts = S.fonts.filter((f) => !f.partial); fillFontSelect();
     Object.assign(S, {
       task,
       name, origBytes: bytes, origDoc, pdf, cur: 0, objs: [], analysis: [], lines: [], sel: null, editing: null,
