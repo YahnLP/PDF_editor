@@ -1,6 +1,6 @@
 import sys, json, asyncio
 from playwright.async_api import async_playwright
-HTML = 'file:///home/claude/pdf_editor/dist/pdf-editor.html'
+HTML = 'file:///home/claude/pdf_editor/index.html'
 PDF = sys.argv[1] if len(sys.argv) > 1 else '/tmp/test.pdf'
 OUT = sys.argv[2] if len(sys.argv) > 2 else '/tmp/out.pdf'
 async def main():

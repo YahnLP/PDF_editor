@@ -1,7 +1,7 @@
 # usage: e2e3.py in.pdf out.pdf "sous-chaîne de ligne à modifier" "nouveau texte" [--rot]
 import sys, json, asyncio
 from playwright.async_api import async_playwright
-HTML = 'file:///home/claude/pdf_editor/dist/pdf-editor.html'
+HTML = 'file:///home/claude/pdf_editor/index.html'
 PDF, OUT, SUB, NEW = sys.argv[1:5]
 async def main():
     async with async_playwright() as p:

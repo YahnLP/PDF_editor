@@ -1,6 +1,6 @@
 import sys, json, asyncio, glob
 from playwright.async_api import async_playwright
-HTML = 'file:///home/claude/pdf_editor/dist/pdf-editor.html'
+HTML = 'file:///home/claude/pdf_editor/index.html'
 TTF = glob.glob('/usr/share/fonts/**/DejaVuSans.ttf', recursive=True)[0]
 async def main():
     async with async_playwright() as p:

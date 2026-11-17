@@ -1,6 +1,6 @@
 import sys, json, asyncio
 from playwright.async_api import async_playwright
-HTML = 'file:///home/claude/pdf_editor/dist/pdf-editor.html'
+HTML = 'file:///home/claude/pdf_editor/index.html'
 async def main():
     async with async_playwright() as p:
         b = await p.chromium.launch(executable_path='/usr/bin/google-chrome', args=['--no-sandbox'])

@@ -1,6 +1,6 @@
 # Éditeur PDF WYSIWYG
 
-Éditeur de PDF qui tourne **entièrement dans le navigateur** (aucun envoi de fichier). Un seul fichier HTML autonome : `dist/pdf-editor.html`.
+Éditeur de PDF qui tourne **entièrement dans le navigateur** (aucun envoi de fichier). Un seul fichier HTML autonome : `index.html`.
 
 ## Fonctions
 
@@ -27,7 +27,7 @@ L'export passe par [pdf-lib](https://pdf-lib.js.org/) : les pages d'origine, leu
 
 ```bash
 npm install
-npm run build        # produit dist/pdf-editor.html
+npm run build        # produit index.html
 ```
 
 - `src/engine.js` : tokenizer du flux de contenu, détection des images, déplacement en place (`P × T × P⁻¹`), suppression du texte par zone.
