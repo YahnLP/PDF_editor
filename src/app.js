@@ -3,6 +3,8 @@ import 'pdfjs-dist/build/pdf.worker.min.mjs';
 import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as E from './engine.js';
+import * as RT from './richtext.js';
+const { IND, MW, listLabels } = RT;
 
 /* =====================================================================
    Constantes, état
@@ -77,8 +79,8 @@ function fontInfo(f) {
 }
 const fontOf = (o) => MF[fkey(o.font)] || MF.helvetica;
 const charSets = new Map();
-function safeText(o, text) {
-  const f = fontOf(o);
+function safeF(spec, text) {
+  const f = MF[fkey(spec)] || MF.helvetica;
   let cs = charSets.get(f);
   if (!cs) { cs = new Set(f.getCharacterSet()); charSets.set(f, cs); }
   let out = '', bad = 0;
@@ -89,6 +91,7 @@ function safeText(o, text) {
   }
   return { text: out, bad };
 }
+const safeText = (o, text) => safeF(o.font, text);
 async function addFontFile(file) {
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -100,6 +103,7 @@ async function addFontFile(file) {
     await ff.load(); document.fonts.add(ff);
     MF['f:' + id] = await measureDoc.embedFont(bytes, { subset: false });
     S.fonts.push({ id, name, bytes, A: kf.ascent / upm, D: -kf.descent / upm });
+    fillFontSelect();
     toast(`Police ajoutée : ${name}`);
     return 'f:' + id;
   } catch (e) {
@@ -111,32 +115,84 @@ async function addFontFile(file) {
 /* =====================================================================
    Mise en page du texte (identique pour l'aperçu et l'export)
    ===================================================================== */
+const getParas = (o) => o.paras || (o.text || '').split('\n').map((t) => ({ runs: t ? [{ t }] : [] }));
+const plainOf = (paras) => paras.map((p) => p.runs.map((r) => r.t).join('')).join('\n');
+const runStyle = (o, r) => ({ fam: r.f ?? o.font.fam, b: r.b ?? !!o.font.b, i: r.i ?? !!o.font.i, u: r.u ?? false, c: r.c ?? o.color, sz: r.sz ?? o.size });
+const sameSt = (a, b) => a.fam === b.fam && a.b === b.b && a.i === b.i && a.u === b.u && a.c === b.c && a.sz === b.sz;
+const wOf = (st, text) => (MF[fkey(st)] || MF.helvetica).widthOfTextAtSize(text, st.sz);
+
+// Mise en page partagée par l'aperçu et l'export : paragraphes, listes, retraits, styles par portion.
 function layout(o) {
-  const mf = fontOf(o), size = o.size, lh = size * (o.lh || 1.2);
-  const { text } = safeText(o, o.text || '');
-  const maxW = o.autoW ? Infinity : Math.max(10, o.w - 2 * PAD);
-  const lines = [];
-  for (const para of text.split('\n')) {
-    if (maxW === Infinity) { lines.push(para); continue; }
-    let cur = '';
-    for (const word of para.split(/(?<= )/)) {
-      const test = cur + word;
-      if (cur && mf.widthOfTextAtSize(test.trimEnd(), size) > maxW) { lines.push(cur.trimEnd()); cur = word; } else cur = test;
-      while (cur.length > 1 && mf.widthOfTextAtSize(cur.trimEnd(), size) > maxW) {
-        let k = cur.length - 1;
-        while (k > 1 && mf.widthOfTextAtSize(cur.slice(0, k), size) > maxW) k--;
-        lines.push(cur.slice(0, k)); cur = cur.slice(k);
-      }
+  const paras = getParas(o), labels = listLabels(paras), lhm = o.lh || 1.2;
+  const maxInner = o.autoW ? Infinity : Math.max(10, o.w - 2 * PAD);
+  let bad = 0;
+  const measure = (st, text) => { const q = safeF(st, text); bad += q.bad; return { text: q.text, w: wOf(st, q.text) }; };
+  const rowsAll = [];
+  paras.forEach((p, pi) => {
+    const lvl = Math.min(p.lvl || 0, 3), textX = lvl * IND + (p.list ? MW : 0);
+    const avail = maxInner === Infinity ? Infinity : Math.max(8, maxInner - textX);
+    const toks = [];
+    for (const r of p.runs) {
+      const st = runStyle(o, r);
+      r.t.split('\n').forEach((seg, si) => {
+        if (si > 0) toks.push({ br: true });
+        for (const m of seg.matchAll(/\S+|\s+/g)) { const q = measure(st, m[0]); toks.push({ text: q.text, w: q.w, st, sp: /^\s/.test(m[0]) }); }
+      });
     }
-    lines.push(cur.trimEnd());
+    const rows = [];
+    let cur = [], curW = 0;
+    const flush = () => { while (cur.length && cur[cur.length - 1].sp) curW -= cur.pop().w; rows.push({ items: cur, w: curW }); cur = []; curW = 0; };
+    const pushTok = (t) => {
+      if (avail !== Infinity && !t.sp && curW + t.w > avail && cur.some((x) => !x.sp)) flush();
+      if (avail !== Infinity && t.sp && cur.length === 0 && rows.length > 0) return;
+      cur.push(t); curW += t.w;
+    };
+    for (const t of toks) {
+      if (t.br) { flush(); continue; }
+      if (avail !== Infinity && !t.sp && t.w > avail) { // mot plus large que la ligne : coupe par caractères
+        let rest = t.text;
+        while (rest.length) {
+          let k = 1;
+          while (k < rest.length && wOf(t.st, rest.slice(0, k + 1)) <= avail) k++;
+          const piece = rest.slice(0, k); rest = rest.slice(k);
+          pushTok({ text: piece, w: wOf(t.st, piece), st: t.st, sp: false });
+          if (rest.length) flush();
+        }
+        continue;
+      }
+      pushTok(t);
+    }
+    flush();
+    rows.forEach((row, ri) => rowsAll.push({ p, pi, lvl, textX, row, first: ri === 0 }));
+  });
+  const innerW = maxInner === Infinity ? Math.max(o.size * 0.6, ...rowsAll.map((r) => r.textX + r.row.w)) : maxInner;
+  const lines = [];
+  let y = PAD;
+  for (const { p, pi, lvl, textX, row, first } of rowsAll) {
+    const items = [];
+    for (const it of row.items) {
+      const last = items[items.length - 1];
+      if (last && sameSt(last.st, it.st)) { last.text += it.text; last.w += it.w; } else items.push({ text: it.text, w: it.w, st: it.st });
+    }
+    const sts = items.length ? items.map((i) => i.st) : [runStyle(o, p.runs.length ? p.runs[p.runs.length - 1] : {})];
+    let asc = 0, desc = 0, lineH = 0;
+    for (const st of sts) {
+      const fi = fontInfo({ fam: st.fam, b: st.b, i: st.i });
+      asc = Math.max(asc, fi.A * st.sz); desc = Math.max(desc, fi.D * st.sz); lineH = Math.max(lineH, st.sz * lhm);
+    }
+    const baseIn = (lineH - (asc + desc)) / 2 + asc;
+    const k = ALIGN[p.align || o.align || 'left'] || 0;
+    let x = PAD + textX + (innerW - textX - row.w) * k;
+    const out = items.map((it) => { const r = { text: it.text, x, w: it.w, st: it.st }; x += it.w; return r; });
+    const ln = { items: out, top: y, h: lineH, base: y + baseIn };
+    if (first && labels[pi]) {
+      const s0 = sts[0];
+      ln.marker = { text: labels[pi], x: PAD + lvl * IND, w: 0, st: { fam: 'helvetica', b: s0.b && s0.fam === 'helvetica', i: false, u: false, c: s0.c, sz: s0.sz } };
+    }
+    lines.push(ln);
+    y += lineH;
   }
-  const ws = lines.map((t) => mf.widthOfTextAtSize(t, size));
-  const innerW = o.autoW ? Math.max(size * 0.6, ...ws) : maxW;
-  return { lines, ws, lh, innerW, w: innerW + 2 * PAD, h: lines.length * lh + 2 * PAD };
-}
-function baselineOff(o) {
-  const fi = fontInfo(o.font), lh = o.size * (o.lh || 1.2);
-  return (lh - (fi.A + fi.D) * o.size) / 2 + fi.A * o.size;
+  return { lines, innerW, w: innerW + 2 * PAD, h: y + PAD, bad };
 }
 function normalize(o) {
   if (o.type !== 'text') return;
@@ -149,19 +205,29 @@ const ALIGN = { left: 0, center: 0.5, right: 1 };
 /* =====================================================================
    Rendu de l'objet dans la scène (unités = points, la scène est mise à l'échelle)
    ===================================================================== */
+function itemEl(it, base) {
+  const fi = fontInfo({ fam: it.st.fam, b: it.st.b, i: it.st.i });
+  const lhI = it.st.sz * 1.25, inBox = (lhI - (fi.A + fi.D) * it.st.sz) / 2 + fi.A * it.st.sz;
+  const e = h('div', { class: 'ln' }, it.text);
+  e.style.cssText = `left:${it.x}px;top:${base - inBox}px;font:${fi.style} ${fi.weight} ${it.st.sz}px/${lhI}px ${fi.css};color:${it.st.c};`;
+  return e;
+}
+function ulEl(it, base) {
+  const e = h('div', { class: 'ul' });
+  e.style.cssText = `left:${it.x}px;top:${base + it.st.sz * 0.1}px;width:${it.w}px;height:${Math.max(0.5, it.st.sz * 0.055)}px;background:${it.st.c};`;
+  return e;
+}
 function objEl(o) {
   const d = h('div', { class: 'obj ' + o.type, 'data-id': o.id });
   d.style.cssText = `left:${o.x}px;top:${o.y}px;width:${o.w}px;height:${o.h}px;`;
   if (o.type === 'text') {
-    const L = layout(o), fi = fontInfo(o.font);
+    const L = layout(o);
     if (o.fill) d.style.background = o.fill;
     if (o.stroke && o.sw) d.style.boxShadow = `inset 0 0 0 ${o.sw}px ${o.stroke}`;
-    L.lines.forEach((t, i) => {
-      const left = PAD + (L.innerW - L.ws[i]) * (ALIGN[o.align] || 0);
-      const ln = h('div', { class: 'ln' }, t);
-      ln.style.cssText = `left:${left}px;top:${PAD + i * L.lh}px;font:${fi.style} ${fi.weight} ${o.size}px/${L.lh}px ${fi.css};color:${o.color};`;
-      d.append(ln);
-    });
+    for (const ln of L.lines) {
+      for (const it of ln.items) { d.append(itemEl(it, ln.base)); if (it.st.u && it.text.trim()) d.append(ulEl(it, ln.base)); }
+      if (ln.marker) d.append(itemEl(ln.marker, ln.base));
+    }
   } else if (o.type === 'rect' || o.type === 'ellipse') {
     if (o.fill) d.style.background = hexA(o.fill, o.fop ?? 1);
     if (o.stroke && o.sw) d.style.boxShadow = `inset 0 0 0 ${o.sw}px ${o.stroke}`;
@@ -205,7 +271,8 @@ function hexRgb(hex) {
 const pdfColor = (hex) => { const [r, g, b] = hexRgb(hex); return rgb(r / 255, g / 255, b / 255); };
 
 function drawStage() {
-  stage.querySelectorAll('.obj,.mask,textarea.edit').forEach((n) => n.remove());
+  if (S.view) { S.view.destroy(); S.view = null; }
+  stage.querySelectorAll('.obj,.mask,.edit').forEach((n) => n.remove());
   for (const o of S.objs[S.cur] || []) {
     if (o.deleted) continue;
     if (o.rm && o.maskNeeded) {
@@ -300,30 +367,42 @@ function duplicate() {
    ===================================================================== */
 function startEditDom(o) {
   const el = stage.querySelector(`.obj[data-id="${o.id}"]`);
-  if (el) el.querySelectorAll('.ln').forEach((n) => { n.style.visibility = 'hidden'; });
-  const ta = h('textarea', { class: 'edit', spellcheck: 'false' });
-  ta.value = o.text;
-  stage.insertBefore(ta, hoverEl);
-  S.ta = ta;
-  styleTa(o);
-  ta.addEventListener('input', () => {
-    o.text = ta.value; o.dirty = true; normalize(o); styleTa(o); updateSel();
-    const el2 = stage.querySelector(`.obj[data-id="${o.id}"]`);
-    if (el2) { el2.style.width = o.w + 'px'; el2.style.height = o.h + 'px'; }
+  if (el) el.querySelectorAll('.ln,.ul').forEach((n) => { n.style.visibility = 'hidden'; });
+  const ed = h('div', { class: 'edit' });
+  stage.insertBefore(ed, hoverEl);
+  S.ta = ed;
+  S.view = RT.createEditor(ed, getParas(o), {
+    onChange: (docChanged) => { if (docChanged) pmChanged(o); syncFmt(); },
+    toggle: (k) => fmtToggle(k),
+    blur: () => { if (S.view) S.view.dom.blur(); },
   });
-  ta.addEventListener('blur', () => endEdit());
-  ta.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Escape' || (e.key === 'Enter' && (e.ctrlKey || e.metaKey))) { e.preventDefault(); ta.blur(); }
+  styleEd(o);
+  S.view.dom.addEventListener('keydown', (e) => e.stopPropagation());
+  S.view.dom.addEventListener('blur', (e) => {
+    const rt = e.relatedTarget;
+    if (rt && rt.closest && rt.closest('#fmt')) return;
+    setTimeout(() => {
+      const a = document.activeElement;
+      if (a && a.closest && a.closest('#fmt')) return;
+      if (S.editing === o) endEdit();
+    }, 0);
   });
-  ta.focus({ preventScroll: true });
+  S.view.focus();
+  syncFmt();
 }
-function styleTa(o) {
-  const ta = S.ta; if (!ta) return;
-  const fi = fontInfo(o.font), lh = o.size * (o.lh || 1.2);
-  ta.style.cssText = `left:${o.x}px;top:${o.y}px;width:${o.w + (o.autoW ? o.size * 1.5 : 0)}px;height:${o.h}px;padding:${PAD}px;` +
-    `font:${fi.style} ${fi.weight} ${o.size}px/${lh}px ${fi.css};color:${o.color};text-align:${o.align || 'left'};` +
-    `background:${o.fill || 'transparent'};white-space:${o.autoW ? 'pre' : 'pre-wrap'};overflow-wrap:anywhere;`;
+function pmChanged(o) {
+  o.paras = RT.parasFromDoc(S.view.state.doc);
+  o.text = plainOf(o.paras);
+  o.dirty = true;
+  normalize(o); styleEd(o); updateSel();
+  const el2 = stage.querySelector(`.obj[data-id="${o.id}"]`);
+  if (el2) { el2.style.width = o.w + 'px'; el2.style.height = o.h + 'px'; }
+}
+function styleEd(o) {
+  const ed = S.ta; if (!ed) return;
+  const fi = fontInfo(o.font);
+  ed.style.cssText = `left:${o.x}px;top:${o.y}px;${o.autoW ? `width:max-content;min-width:${o.w}px;` : `width:${o.w}px;`}min-height:${o.h}px;padding:${PAD}px;box-sizing:border-box;` +
+    `font:${fi.style} ${fi.weight} ${o.size}px/${o.lh || 1.2} ${fi.css};color:${o.color};text-align:${o.align || 'left'};background:${o.fill || 'transparent'};`;
 }
 function startEdit(o) {
   if (S.editing === o) return;
@@ -331,15 +410,13 @@ function startEdit(o) {
   S.editing = o;
   select(o.id);
   drawStage();
-  const ta = S.ta;
-  if (ta) { ta.setSelectionRange(ta.value.length, ta.value.length); }
 }
 function endEdit(silent) {
   const o = S.editing; if (!o) return;
   S.editing = null;
-  if (S.ta) { const t = S.ta; S.ta = null; t.remove(); }
+  if (S.view) { S.view.destroy(); S.view = null; }
+  if (S.ta) { S.ta.remove(); S.ta = null; }
   if (o.text === '' && !o.rm) { removeObj(o); S.sel = null; }
-  else if (o.rm && o.text === '' && !o.dirty) { /* sera annulé à la désélection */ }
   if (!silent) { drawStage(); renderProps(); if (o.dirty) commit(); }
 }
 
@@ -482,8 +559,8 @@ function startEditLine(l) {
     rm: { x0: l.e, x1: l.x1, y: l.f, size: l.size, bg: cols.bg, disp: { x: l.rect.x - 0.5, y: l.rect.y, w: l.rect.w + 1, h: l.rect.h } },
     maskNeeded: true,
   };
-  o.x = l.dx - PAD; o.y = l.base - baselineOff(o) - PAD;
   normalize(o);
+  o.x = l.dx - PAD; o.y = l.base - layout(o).lines[0].base;
   S.objs[S.cur].push(o);
   scheduleRebuild();
   startEdit(o);
@@ -570,13 +647,20 @@ async function buildPdf(draw) {
         page.drawImage(img, { x: bl[0], y: bl[1], width: o.w, height: o.h, rotate: degrees(rot), opacity: o.op ?? 1 });
       }
       if (o.type === 'text') {
-        const font = await getFont(o.font), L = layout(o), off = baselineOff(o);
-        L.lines.forEach((t, i) => {
-          if (!t) return;
-          const left = o.x + PAD + (L.innerW - L.ws[i]) * (ALIGN[o.align] || 0);
-          const p = P(left, o.y + PAD + i * L.lh + off);
-          page.drawText(t, { x: p[0], y: p[1], size: o.size, font, color: pdfColor(o.color), rotate: degrees(rot) });
-        });
+        const L = layout(o);
+        for (const ln of L.lines) {
+          for (const it of ln.marker ? [...ln.items, ln.marker] : ln.items) {
+            if (!it.text.trim()) continue;
+            const font = await getFont({ fam: it.st.fam, b: it.st.b, i: it.st.i });
+            const col = pdfColor(it.st.c);
+            const p0 = P(o.x + it.x, o.y + ln.base);
+            page.drawText(it.text, { x: p0[0], y: p0[1], size: it.st.sz, font, color: col, rotate: degrees(rot) });
+            if (it.st.u) {
+              const yy = o.y + ln.base + it.st.sz * 0.1, a = P(o.x + it.x, yy), b = P(o.x + it.x + it.w, yy);
+              page.drawLine({ start: { x: a[0], y: a[1] }, end: { x: b[0], y: b[1] }, thickness: Math.max(0.5, it.st.sz * 0.055), color: col });
+            }
+          }
+        }
       }
     }
   }
@@ -821,11 +905,11 @@ function hitHandle(x, y) {
 const CURS = { n: 'ns', s: 'ns', e: 'ew', w: 'ew', ne: 'nesw', sw: 'nesw', nw: 'nwse', se: 'nwse' };
 let drag = null;
 
-stage.addEventListener('mousedown', (e) => { if (e.target !== S.ta) e.preventDefault(); });
+stage.addEventListener('mousedown', (e) => { if (!(S.ta && S.ta.contains(e.target))) e.preventDefault(); });
 stage.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || !S.pdf) return;
   const p = ptr(e);
-  if (S.editing && e.target === S.ta) return;
+  if (S.editing && S.ta && S.ta.contains(e.target)) return;
   if (S.editing) endEdit();
   stage.setPointerCapture(e.pointerId);
   const hd = hitHandle(p.x, p.y);
@@ -1013,7 +1097,7 @@ function live() {
   o.dirty = true;
   if (o.type === 'text') normalize(o);
   refreshObj(o);
-  if (S.editing === o) { styleTa(o); }
+  if (S.editing === o) { styleEd(o); }
 }
 function geom(o) {
   return [
@@ -1036,7 +1120,8 @@ function actionButtons(o) {
 }
 
 const put = (...n) => propsEl.append(...n.flat().filter(Boolean));
-function renderProps() {
+function renderProps() { renderPropsInner(); syncFmt(); }
+function renderPropsInner() {
   const o = curObj();
   propsEl.innerHTML = '';
   if (!S.pdf) { put(h('p', { class: 'hint' }, 'Ouvrez un PDF pour commencer.')); return; }
@@ -1060,26 +1145,12 @@ function renderProps() {
     return;
   }
   if (o.type === 'text') {
-    const opts = [];
-    for (const fam of Object.keys(STD)) opts.push(h('option', { value: fam }, STD_META[fam].label));
-    for (const f of S.fonts) opts.push(h('option', { value: 'f:' + f.id }, f.name));
-    const sel = h('select', {}, opts); sel.value = o.font.fam;
-    sel.addEventListener('change', () => { o.font.fam = sel.value; live(); commit(); renderProps(); });
-    const custom = o.font.fam.startsWith('f:');
-    const bold = h('button', { class: o.font.b ? 'on' : '', onclick: () => { o.font.b = !o.font.b; live(); commit(); renderProps(); }, disabled: custom }, h('b', {}, 'G'));
-    const ital = h('button', { class: o.font.i ? 'on' : '', onclick: () => { o.font.i = !o.font.i; live(); commit(); renderProps(); }, disabled: custom }, h('i', {}, 'I'));
-    const al = h('div', { class: 'seg' }, ...[['left', '⬅'], ['center', '↔'], ['right', '➡']].map(([k, ic]) =>
-      h('button', { class: (o.align || 'left') === k ? 'on' : '', title: k, onclick: () => { o.align = k; live(); commit(); renderProps(); } }, ic)));
-    const bad = safeText(o, o.text || '').bad;
+    const bad = layout(o).bad;
     put(
       h('h3', {}, o.rm ? 'Texte du document' : 'Texte'),
-      h('label', { class: 'f' }, h('span', {}, 'Police'), sel),
-      h('div', { class: 'f' }, h('span', {}, 'Style'), h('div', { class: 'seg' }, bold, ital)),
-      numField('Taille', () => o.size, (v) => { o.size = Math.max(1, v); }, { step: 0.5, min: 1 }),
+      h('p', { class: 'hint' }, 'Police, taille, styles, couleur, listes à puces ou numérotées, retraits et alignement : barre d\'outils au-dessus de la page (sur la sélection pendant la saisie, sur tout le texte sinon).'),
       numField('Interligne', () => o.lh || 1.2, (v) => { o.lh = Math.max(0.5, v); }, { step: 0.05, min: 0.5 }),
-      colorField('Couleur', () => o.color, (v) => { o.color = v; }),
-      h('div', { class: 'f' }, h('span', {}, 'Alignement'), al),
-      bad ? h('div', { class: 'warn' }, `${bad} caractère(s) absent(s) de cette police s'affichent « ? ». Ajoutez une police .ttf/.otf couvrant ces caractères.`, h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: async () => { $('#fontIn').dataset.apply = '1'; $('#fontIn').click(); } }, 'Ajouter une police…'))) : null,
+      bad ? h('div', { class: 'warn' }, `${bad} caractère(s) absent(s) de cette police s'affichent « ? ». Ajoutez une police .ttf/.otf couvrant ces caractères.`, h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: () => { $('#fontIn').dataset.apply = '1'; $('#fontIn').click(); } }, 'Ajouter une police…'))) : null,
       h('h3', {}, 'Fond et bordure'),
       checkField('Fond', () => !!o.fill, (v) => { o.fill = v ? (o.fill || '#ffffff') : null; }, o.fill ? colorField('', () => o.fill, (v) => { o.fill = v; }) : null),
       checkField('Bordure', () => o.stroke && o.sw, (v) => { o.stroke = v ? (o.stroke || '#000000') : null; o.sw = v ? (o.sw || 1) : 0; }, o.stroke && o.sw ? colorField('', () => o.stroke, (v) => { o.stroke = v; }) : null),
@@ -1136,6 +1207,115 @@ function renderProps() {
 let replaceImage = null;
 
 /* =====================================================================
+   Barre d'outils de mise en forme (type traitement de texte)
+   ===================================================================== */
+const F = {};
+['fFont', 'fSize', 'fB', 'fI', 'fU', 'fColor', 'fBul', 'fNum', 'fOut', 'fInd', 'fAL', 'fAC', 'fAR'].forEach((id) => { F[id] = $('#' + id); });
+function fillFontSelect() {
+  F.fFont.innerHTML = '';
+  for (const fam of Object.keys(STD)) F.fFont.append(h('option', { value: fam }, STD_META[fam].label));
+  for (const f of S.fonts) F.fFont.append(h('option', { value: 'f:' + f.id }, f.name));
+}
+const pmDef = (o) => ({ b: !!o.font.b, i: !!o.font.i, u: false, c: o.color, sz: o.size, f: o.font.fam });
+const pmVal = (marks, key, def) => { const m = marks.find((x) => x.type.name === key); return m ? m.attrs.v : def; };
+function pmEffective(key) { // valeurs effectives de la sélection de l'éditeur
+  const st = S.view.state, { from, to, empty, $from } = st.selection, def = pmDef(curObj())[key], vals = [];
+  if (empty) vals.push(pmVal(st.storedMarks || $from.marks(), key, def));
+  else st.doc.nodesBetween(from, to, (n) => { if (n.isText) vals.push(pmVal(n.marks, key, def)); });
+  return vals.length ? vals : [def];
+}
+function pmApply(key, val) {
+  const o = curObj(), st = S.view.state, { from, to, empty } = st.selection, mt = RT.schema.marks[key], def = pmDef(o)[key];
+  let tr = st.tr;
+  if (empty) tr = val === def ? tr.removeStoredMark(mt) : tr.addStoredMark(mt.create({ v: val }));
+  else tr = val === def ? tr.removeMark(from, to, mt) : tr.addMark(from, to, mt.create({ v: val }));
+  S.view.dispatch(tr); S.view.focus();
+}
+function pmParaAttrs() {
+  const st = S.view.state, out = [];
+  st.doc.nodesBetween(st.selection.from, st.selection.to, (n) => { if (n.type.name === 'para') out.push(n.attrs); return false; });
+  return out;
+}
+function ensureRich(o) {
+  if (!o.paras) o.paras = getParas(o).map((p) => ({ ...p, runs: p.runs.map((r) => ({ ...r })) }));
+  return o.paras;
+}
+function modelStyle(o, prop, val) { // sans édition en cours : s'applique à tout le texte
+  ensureRich(o);
+  if (prop === 'u') { for (const p of o.paras) for (const r of p.runs) { if (val) r.u = true; else delete r.u; } return; }
+  if (prop === 'b' || prop === 'i') o.font[prop] = val;
+  else if (prop === 'c') o.color = val;
+  else if (prop === 'sz') o.size = val;
+  else if (prop === 'f') { o.font.fam = val; if (val.startsWith('f:')) { o.font.b = false; o.font.i = false; } }
+  for (const p of o.paras) for (const r of p.runs) delete r[prop];
+}
+function afterModel(o) { live(); commit(); syncFmt(); renderProps(); }
+function fmtToggle(k) {
+  const o = curObj(); if (!o || o.type !== 'text') return;
+  if (S.view) { pmApply(k, !pmEffective(k).every(Boolean)); return; }
+  const ps = getParas(o);
+  const all = ps.some((p) => p.runs.length) && ps.every((p) => p.runs.every((r) => runStyle(o, r)[k]));
+  modelStyle(o, k, !all); afterModel(o);
+}
+function fmtValue(key, val) {
+  const o = curObj(); if (!o || o.type !== 'text') return;
+  if (S.view) { pmApply(key, val); return; }
+  modelStyle(o, key, val); afterModel(o);
+}
+function paraSet(fn) {
+  const o = curObj(); if (!o || o.type !== 'text') return;
+  if (S.view) {
+    const st = S.view.state, tr = st.tr;
+    st.doc.nodesBetween(st.selection.from, st.selection.to, (n, pos) => { if (n.type.name === 'para') tr.setNodeMarkup(pos, null, { ...n.attrs, ...fn(n.attrs) }); return false; });
+    S.view.dispatch(tr); S.view.focus(); return;
+  }
+  for (const p of ensureRich(o)) {
+    Object.assign(p, fn(p));
+    for (const k of ['list', 'lvl', 'align']) if (!p[k]) delete p[k];
+  }
+  afterModel(o);
+}
+function toggleList(kind) {
+  const o = curObj(); if (!o || o.type !== 'text') return;
+  const items = S.view ? pmParaAttrs() : getParas(o);
+  const all = items.length > 0 && items.every((p) => p.list === kind);
+  paraSet(() => ({ list: all ? null : kind }));
+}
+const indentBy = (d) => paraSet((p) => ({ lvl: Math.max(0, Math.min(3, (p.lvl || 0) + d)) }));
+const alignTo = (a) => paraSet(() => ({ align: a }));
+function syncFmt() {
+  const o = curObj(), on = !!o && o.type === 'text';
+  for (const k in F) F[k].disabled = !on;
+  if (!on) return;
+  let st, pa;
+  if (S.view) {
+    const e = (k) => pmEffective(k)[0];
+    st = { b: e('b'), i: e('i'), u: e('u'), c: e('c'), sz: e('sz'), f: e('f') };
+    pa = S.view.state.selection.$from.parent.attrs;
+  } else {
+    const ps = getParas(o);
+    st = runStyle(o, ps[0].runs[0] || {}); st.f = st.fam; pa = ps[0];
+  }
+  if (document.activeElement !== F.fSize) F.fSize.value = r1(st.sz);
+  F.fFont.value = st.f;
+  F.fColor.value = /^#[0-9a-f]{6}$/i.test(st.c) ? st.c : '#000000';
+  F.fB.classList.toggle('on', !!st.b); F.fI.classList.toggle('on', !!st.i); F.fU.classList.toggle('on', !!st.u);
+  F.fBul.classList.toggle('on', pa.list === 'b'); F.fNum.classList.toggle('on', pa.list === 'n');
+  const al = pa.align || o.align || 'left';
+  F.fAL.classList.toggle('on', al === 'left'); F.fAC.classList.toggle('on', al === 'center'); F.fAR.classList.toggle('on', al === 'right');
+}
+RT.setFontCss((fam) => fontInfo({ fam, b: false, i: false }).css);
+fillFontSelect();
+document.querySelectorAll('#fmt button').forEach((b) => b.addEventListener('mousedown', (e) => e.preventDefault()));
+F.fB.onclick = () => fmtToggle('b'); F.fI.onclick = () => fmtToggle('i'); F.fU.onclick = () => fmtToggle('u');
+F.fFont.onchange = () => fmtValue('f', F.fFont.value);
+F.fSize.onchange = () => { const v = parseFloat(F.fSize.value); if (v >= 1) fmtValue('sz', v); };
+F.fColor.oninput = () => fmtValue('c', F.fColor.value);
+F.fBul.onclick = () => toggleList('b'); F.fNum.onclick = () => toggleList('n');
+F.fOut.onclick = () => indentBy(-1); F.fInd.onclick = () => indentBy(1);
+F.fAL.onclick = () => alignTo('left'); F.fAC.onclick = () => alignTo('center'); F.fAR.onclick = () => alignTo('right');
+
+/* =====================================================================
    Branchements globaux
    ===================================================================== */
 $('#btnOpen').onclick = $('#btnOpen2').onclick = () => $('#fileIn').click();
@@ -1161,7 +1341,7 @@ $('#fontIn').onchange = async (e) => {
   if (!f) return;
   const fam = await addFontFile(f);
   const o = curObj();
-  if (fam && apply && o && o.type === 'text') { o.font = { fam, b: false, i: false }; normalize(o); drawStage(); commit(); }
+  if (fam && apply && o && o.type === 'text') { modelStyle(o, 'f', fam); normalize(o); drawStage(); commit(); }
   renderProps();
 };
 $('#btnSave').onclick = save;

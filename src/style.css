@@ -49,7 +49,7 @@ button:disabled{opacity:.4;cursor:default;pointer-events:none}
 #sel{position:absolute;pointer-events:none;border:1px solid var(--accent);display:none}
 #sel i{position:absolute;width:calc(9px*var(--iz,1));height:calc(9px*var(--iz,1));background:#fff;border:calc(1.5px*var(--iz,1)) solid var(--accent);border-radius:2px;margin:calc(-4.5px*var(--iz,1)) 0 0 calc(-4.5px*var(--iz,1))}
 #sel{border-width:calc(1px*var(--iz,1))}
-textarea.edit{position:absolute;margin:0;border:0;outline:1px dashed var(--accent);resize:none;overflow:hidden;background:transparent;padding:0;white-space:pre;font-family:inherit}
+
 #props{width:260px;flex:none;background:var(--panel);border-left:1px solid var(--line);overflow:auto;padding:12px}
 #props h3{margin:14px 0 8px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 #props h3:first-child{margin-top:0}
@@ -71,3 +71,21 @@ textarea.edit{position:absolute;margin:0;border:0;outline:1px dashed var(--accen
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:9px 16px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:50;max-width:80vw}
 .danger{color:#b91c1c}
 .f input[type=text],.f input[type=number],.f select{min-width:0;max-width:128px}
+
+#fmt{display:flex;align-items:center;gap:5px;padding:5px 12px;background:var(--panel);border-bottom:1px solid var(--line);flex:none;flex-wrap:wrap}
+#fmt button{width:30px;height:28px;padding:0;border:1px solid transparent;background:none;border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:14px}
+#fmt button svg{width:18px;height:18px;fill:currentColor}
+#fmt button:hover{background:#f3f4f6}
+#fmt button.on{background:var(--accent-soft);color:var(--accent);border-color:#c7d7fb}
+#fmt select{width:150px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;background:#fff;height:28px}
+#fmt input[type=number]{width:58px;padding:4px 6px;border:1px solid var(--line);border-radius:6px;height:28px}
+#fmt input[type=color]{width:34px;height:28px;padding:1px;border:1px solid var(--line);border-radius:6px;background:#fff}
+#fmt :disabled{opacity:.4;pointer-events:none}
+.sep{width:1px;height:20px;background:var(--line);margin:0 4px}
+.hint2{color:var(--muted);font-size:12px;margin-left:8px}
+.obj .ul{position:absolute;pointer-events:none}
+.edit{position:absolute;margin:0;outline:1px dashed var(--accent);user-select:text;-webkit-user-select:text;cursor:text;white-space:pre-wrap;overflow-wrap:anywhere;min-width:20px}
+.edit:focus{outline:1px dashed var(--accent)}
+.edit div{position:relative;min-height:1em}
+.edit div[data-m]::before{content:attr(data-m);position:absolute;left:var(--ml,0);top:0}
+.edit .ProseMirror-selectednode{outline:none}

@@ -33,6 +33,24 @@
   <input id="imgIn" type="file" accept="image/*" hidden>
   <input id="fontIn" type="file" accept=".ttf,.otf,.woff" hidden>
 </header>
+<div id="fmt" aria-label="Mise en forme du texte">
+  <select id="fFont" title="Police" disabled></select>
+  <input id="fSize" type="number" min="1" max="400" step="1" title="Taille (pt)" disabled>
+  <button id="fB" title="Gras (Ctrl+B)" disabled><b>G</b></button>
+  <button id="fI" title="Italique (Ctrl+I)" disabled><i>I</i></button>
+  <button id="fU" title="Souligné (Ctrl+U)" disabled><u>S</u></button>
+  <input id="fColor" type="color" title="Couleur du texte" disabled>
+  <span class="sep"></span>
+  <button id="fBul" title="Liste à puces" disabled><svg viewBox="0 0 24 24"><circle cx="5" cy="7" r="1.7"/><circle cx="5" cy="12" r="1.7"/><circle cx="5" cy="17" r="1.7"/><path d="M10 7h10M10 12h10M10 17h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <button id="fNum" title="Liste numérotée" disabled><svg viewBox="0 0 24 24"><text x="1.5" y="9" font-size="7.5" font-weight="700" fill="currentColor">1</text><text x="1.5" y="14.5" font-size="7.5" font-weight="700" fill="currentColor">2</text><text x="1.5" y="20" font-size="7.5" font-weight="700" fill="currentColor">3</text><path d="M10 7h10M10 12h10M10 17h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <button id="fOut" title="Diminuer le retrait (Maj+Tab)" disabled><svg viewBox="0 0 24 24"><path d="M11 6h9M11 12h9M11 18h9M7 9l-3 3 3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <button id="fInd" title="Augmenter le retrait (Tab)" disabled><svg viewBox="0 0 24 24"><path d="M11 6h9M11 12h9M11 18h9M4 9l3 3-3 3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  <span class="sep"></span>
+  <button id="fAL" title="Aligner à gauche" disabled><svg viewBox="0 0 24 24"><path d="M4 6h16M4 10h10M4 14h16M4 18h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <button id="fAC" title="Centrer" disabled><svg viewBox="0 0 24 24"><path d="M4 6h16M7 10h10M4 14h16M7 18h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <button id="fAR" title="Aligner à droite" disabled><svg viewBox="0 0 24 24"><path d="M4 6h16M10 10h10M4 14h16M10 18h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+  <span class="hint2">Sélectionnez ou éditez un texte pour le mettre en forme</span>
+</div>
 <main id="main">
   <aside id="thumbs"></aside>
   <nav id="tools">
