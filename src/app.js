@@ -4,6 +4,7 @@ import { PDFDocument, StandardFonts, rgb, degrees } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as E from './engine.js';
 import * as RT from './richtext.js';
+import { identify, loadLib, LIB, libLabel } from './fontid.js';
 const { IND, MW, listLabels } = RT;
 
 /* =====================================================================
@@ -92,6 +93,14 @@ function safeF(spec, text) {
   return { text: out, bad };
 }
 const safeText = (o, text) => safeF(o.font, text);
+const libFont = (c) => S.fonts.find((f) => f.lib === c.id);
+async function ensureLibFont(c) {
+  const have = libFont(c);
+  if (have) return 'f:' + have.id;
+  await loadLib();
+  const { id } = await registerFont(c.data.slice(), libLabel(c), { lib: c.id });
+  return 'f:' + id;
+}
 async function registerFont(bytes, name, extra) {
   const kf = fontkit.create(bytes);
   const id = uid('f');
@@ -144,9 +153,9 @@ async function addFontFile(file) {
    ===================================================================== */
 const getParas = (o) => o.paras || (o.text || '').split('\n').map((t) => ({ runs: t ? [{ t }] : [] }));
 const plainOf = (paras) => paras.map((p) => p.runs.map((r) => r.t).join('')).join('\n');
-const runStyle = (o, r) => ({ fam: r.f ?? o.font.fam, b: r.b ?? !!o.font.b, i: r.i ?? !!o.font.i, u: r.u ?? false, c: r.c ?? o.color, sz: r.sz ?? o.size });
-const sameSt = (a, b) => a.fam === b.fam && a.b === b.b && a.i === b.i && a.u === b.u && a.c === b.c && a.sz === b.sz;
-const wOf = (st, text) => (MF[fkey(st)] || MF.helvetica).widthOfTextAtSize(text, st.sz);
+const runStyle = (o, r) => ({ fam: r.f ?? o.font.fam, b: r.b ?? !!o.font.b, i: r.i ?? !!o.font.i, u: r.u ?? false, c: r.c ?? o.color, sz: r.sz ?? o.size, ls: o.ls || 0 });
+const sameSt = (a, b) => a.fam === b.fam && a.b === b.b && a.i === b.i && a.u === b.u && a.c === b.c && a.sz === b.sz && (a.ls || 0) === (b.ls || 0);
+const wOf = (st, text) => (MF[fkey(st)] || MF.helvetica).widthOfTextAtSize(text, st.sz) + (st.ls ? st.ls * st.sz * [...text].length : 0);
 
 // Police extraite du PDF = sous-ensemble : les caractères absents passent dans une police standard de même graisse.
 function splitFallback(st, text) {
@@ -251,7 +260,7 @@ function itemEl(it, base) {
   const fi = fontInfo({ fam: it.st.fam, b: it.st.b, i: it.st.i });
   const lhI = it.st.sz * 1.25, inBox = (lhI - (fi.A + fi.D) * it.st.sz) / 2 + fi.A * it.st.sz;
   const e = h('div', { class: 'ln' }, it.text);
-  e.style.cssText = `left:${it.x}px;top:${base - inBox}px;font:${fi.style} ${fi.weight} ${it.st.sz}px/${lhI}px ${fi.css};color:${it.st.c};`;
+  e.style.cssText = `left:${it.x}px;top:${base - inBox}px;font:${fi.style} ${fi.weight} ${it.st.sz}px/${lhI}px ${fi.css};color:${it.st.c};${it.st.ls ? `letter-spacing:${it.st.ls * it.st.sz}px;` : ''}`;
   return e;
 }
 function ulEl(it, base) {
@@ -446,7 +455,7 @@ function styleEd(o) {
   const ed = S.ta; if (!ed) return;
   const fi = fontInfo(o.font);
   ed.style.cssText = `left:${o.x}px;top:${o.y}px;${o.autoW ? `width:max-content;min-width:${o.w}px;` : `width:${o.w}px;`}min-height:${o.h}px;padding:${PAD}px;box-sizing:border-box;` +
-    `font:${fi.style} ${fi.weight} ${o.size}px/${o.lh || 1.2} ${fi.css};color:${o.color};text-align:${o.align || 'left'};background:${o.fill || 'transparent'};`;
+    `font:${fi.style} ${fi.weight} ${o.size}px/${o.lh || 1.2} ${fi.css};color:${o.color};text-align:${o.align || 'left'};background:${o.fill || 'transparent'};${o.ls ? `letter-spacing:${o.ls * o.size}px;` : ''}`;
 }
 function startEdit(o) {
   if (S.editing === o) return;
@@ -571,8 +580,8 @@ function lineAt(x, y) {
   return null;
 }
 
-function sampleColors(r) {
-  const k = S.canvasScale, ctx = cv.getContext('2d');
+function sampleColors(r, src = cv, k = S.canvasScale) {
+  const cv = src, ctx = cv.getContext('2d');
   const x = Math.max(0, Math.floor((r.x) * k)), y = Math.max(0, Math.floor(r.y * k));
   const w = Math.max(2, Math.min(cv.width - x, Math.ceil(r.w * k))), hh = Math.max(2, Math.min(cv.height - y, Math.ceil(r.h * k)));
   const d = ctx.getImageData(x, y, w, hh).data;
@@ -594,6 +603,18 @@ function sampleColors(r) {
   return { bg: hex(bg), fg: dist(fg) < 600 ? '#000000' : hex(fg) };
 }
 
+// Rendu de la page en haute définition (~288 ppi) pour analyser les lettres d'une image : l'écran, lui, est trop grossier.
+async function hiRes() {
+  const pi = S.cur;
+  if (S.hi && S.hi.pi === pi && S.hi.sig === S.baseSig) return S.hi;
+  const page = await S.pdf.getPage(pi + 1), pg = S.pages[pi];
+  const scale = Math.max(S.canvasScale, Math.min(4, Math.sqrt(40e6 / (pg.w * pg.h))));
+  const vp = page.getViewport({ scale });
+  const c = document.createElement('canvas'); c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+  await page.render({ canvas: c, canvasContext: c.getContext('2d', { willReadFrequently: true }), viewport: vp }).promise;
+  S.hi = { pi, sig: S.baseSig, cv: c, k: c.width / pg.w };
+  return S.hi;
+}
 // Texte invisible (rendu 3 : couche OCR) ou police « Glyphless » : le texte affiché est une image ou un tracé.
 function isInvisibleLine(l) {
   if (/glyphless/i.test(fontNameOf(l.fontName))) return true;
@@ -604,16 +625,18 @@ function isInvisibleLine(l) {
   return hit.length > 0 && hit.every((sh) => sh.tr === 3);
 }
 // Cherche, sur l'image de la page, la ligne de lettres réellement visible sous le clic (indépendamment de la couche texte).
-function inkBand(l, pt) {
-  const k = S.canvasScale, ctx = cv.getContext('2d'), size = l.size;
+function inkBand(l, pt, cv, k) {
+  const ctx = cv.getContext('2d'), size = l.size;
   const x0 = Math.max(0, Math.floor((l.rect.x - size) * k)), y0 = Math.max(0, Math.floor((pt.y - size * 1.1) * k));
   const w = Math.min(cv.width - x0, Math.ceil((l.rect.w + size * 3) * k)), hh = Math.min(cv.height - y0, Math.ceil(size * 2.2 * k));
   if (w < 4 || hh < 4) return null;
   const d = ctx.getImageData(x0, y0, w, hh).data;
-  const bg = hexRgb(sampleColors({ x: x0 / k, y: y0 / k, w: w / k, h: hh / k }).bg);
+  const bg = hexRgb(sampleColors({ x: x0 / k, y: y0 / k, w: w / k, h: hh / k }, cv, k).bg);
   const ink = (i, j) => { const q = (j * w + i) * 4; return (d[q] - bg[0]) ** 2 + (d[q + 1] - bg[1]) ** 2 + (d[q + 2] - bg[2]) ** 2 > 4000; };
   const row = new Array(hh).fill(0);
-  for (let j = 0; j < hh; j++) for (let i = 0; i < w; i++) if (ink(i, j)) row[j]++;
+  // seules les colonnes de la ligne OCR comptent (± marge) : les filets et cadres voisins ne doivent pas fausser la bande
+  const lo = Math.max(0, Math.floor((l.rect.x - 0.03 * l.rect.w) * k - x0)), hi = Math.min(w - 1, Math.ceil((l.rect.x + 1.03 * l.rect.w) * k - x0));
+  for (let j = 0; j < hh; j++) for (let i = lo; i <= hi; i++) if (ink(i, j)) row[j]++;
   const cy = Math.round(pt.y * k) - y0;
   let r = -1;
   for (let dj = 0; dj < hh && r < 0; dj++) for (const j of [cy + dj, cy - dj]) if (j >= 0 && j < hh && row[j] >= 2) { r = j; break; }
@@ -625,39 +648,94 @@ function inkBand(l, pt) {
   while (r1 < hh - 1 && live(r1 + 1) && r1 - r0 < maxH) r1++;
   const col = new Array(w).fill(0);
   let n = 0;
-  for (let j = r0; j <= r1; j++) for (let i = 0; i < w; i++) if (ink(i, j)) { col[i]++; n++; }
+  for (let j = r0; j <= r1; j++) for (let i = 0; i < w; i++) if (ink(i, j)) { col[i]++; if (i >= lo && i <= hi) n++; }
   const cx = Math.round(pt.x * k) - x0;
   let c = -1;
   for (let di = 0; di < w && c < 0; di++) for (const i of [cx + di, cx - di]) if (i >= 0 && i < w && col[i] > 0) { c = i; break; }
   if (c < 0) return null;
   const gap = Math.max(4, 0.6 * (r1 - r0));
   let c0 = c, c1 = c, miss = 0;
-  for (let i = c; i >= 0; i--) { if (col[i] > 0) { c0 = i; miss = 0; } else if (++miss > gap) break; }
+  for (let i = c; i >= 0; i--) { if (col[i] > 0) { c0 = i; miss = 0; } else if (++miss > gap && i < lo) break; else if (i < lo - gap) break; }
   miss = 0;
-  for (let i = c; i < w; i++) { if (col[i] > 0) { c1 = i; miss = 0; } else if (++miss > gap) break; }
+  for (let i = c; i < w; i++) { if (col[i] > 0) { c1 = i; miss = 0; } else if (++miss > gap && i > hi) break; else if (i > hi + gap) break; }
   const rect = { x: (x0 + c0) / k, y: (y0 + r0) / k, w: (c1 - c0 + 1) / k, h: (r1 - r0 + 1) / k };
-  return { rect, density: n / Math.max(1, (c1 - c0 + 1) * (r1 - r0 + 1)) };
+  // silhouette de l'encre (alpha = encre) pour la reconnaissance de police ; trous entre les mots
+  const mw = c1 - c0 + 1, mh = r1 - r0 + 1;
+  const mask = document.createElement('canvas'); mask.width = mw; mask.height = mh;
+  const mctx = mask.getContext('2d'), img = mctx.createImageData(mw, mh);
+  for (let j = 0; j < mh; j++) for (let i = 0; i < mw; i++) if (ink(c0 + i, r0 + j)) img.data[(j * mw + i) * 4 + 3] = 255;
+  mctx.putImageData(img, 0, 0);
+  const gaps = [];
+  for (let i = c0; i <= c1;) { if (col[i] > 0) { i++; continue; } let e = i; while (e <= c1 && col[e] === 0) e++; if (i > c0 && e <= c1) gaps.push({ a: i - c0, b: e - c0 }); i = e; }
+  return { rect, density: n / Math.max(1, mw * mh), mask, gaps, k };
 }
 
+// Couleur de fond autour d'une zone : moyenne des pixels dominants de l'anneau extérieur (pas du bord, souvent encré)
+function ringBg(r, src, k) {
+  const ctx = src.getContext('2d'), pad = Math.max(3, Math.round(0.3 * r.h * k));
+  const x = Math.max(0, Math.floor(r.x * k) - pad), y = Math.max(0, Math.floor(r.y * k) - pad);
+  const w = Math.min(src.width - x, Math.ceil(r.w * k) + 2 * pad), hh = Math.min(src.height - y, Math.ceil(r.h * k) + 2 * pad);
+  const d = ctx.getImageData(x, y, w, hh).data;
+  const ix0 = Math.floor(r.x * k) - x, iy0 = Math.floor(r.y * k) - y, ix1 = ix0 + Math.ceil(r.w * k), iy1 = iy0 + Math.ceil(r.h * k);
+  const bins = new Map();
+  for (let j = 0; j < hh; j++) for (let i = 0; i < w; i++) {
+    if (i >= ix0 && i < ix1 && j >= iy0 && j < iy1) continue;
+    const q = (j * w + i) * 4, key = (d[q] >> 3) * 1024 + (d[q + 1] >> 3) * 32 + (d[q + 2] >> 3);
+    const b = bins.get(key) || { n: 0, r: 0, g: 0, b: 0 }; b.n++; b.r += d[q]; b.g += d[q + 1]; b.b += d[q + 2]; bins.set(key, b);
+  }
+  let best = null;
+  for (const b of bins.values()) if (!best || b.n > best.n) best = b;
+  if (!best) return null;
+  return '#' + [best.r, best.g, best.b].map((v) => Math.round(v / best.n).toString(16).padStart(2, '0')).join('');
+}
 async function startEditLine(l, pt) {
   const vp = S.pages[S.cur].vp;
   let ink = null;
-  if (pt && isInvisibleLine(l)) ink = inkBand(l, pt);
-  const invisible = !!ink;
+  if (pt && isInvisibleLine(l)) { const hr = await hiRes(); ink = inkBand(l, pt, hr.cv, hr.k); }
+  const invisible = !!ink; if (ink) S.lastInk = ink;
   const emb = invisible ? null : await embeddedFontFor(l.fontName);
   let font = emb ? { fam: emb, b: false, i: false } : guessFont(l.rawName || fontNameOf(l.fontName), fontObjOf(l.fontName));
   if (invisible && ink.density > 0.28) font = { ...font, b: true };
+  // mots repérés sur l'image : un vide d'encre entre chaque mot (les N-1 plus larges vides)
+  let spans = null;
+  const ns = (l.str.match(/\S+/g) || []);
+  if (ink && ns.length > 1) {
+    const big = ink.gaps.slice().sort((a, b) => (b.b - b.a) - (a.b - a.a)).slice(0, ns.length - 1).sort((a, b) => a.a - b.a);
+    if (big.length === ns.length - 1) {
+      const edges = [0, ...big.flatMap((g) => [g.a, g.b]), ink.mask.width];
+      spans = ns.map((t, i) => ({ a: edges[i * 2], b: edges[i * 2 + 1], text: t }));
+    }
+  }
+  let fit = null; // résultat de la reconnaissance : corps, interlettrage, ligne de base
+  if (invisible) {
+    try {
+      fit = await identify(ink.mask, l.str, { words: spans, prefer: (S.libVotes || []).filter((v) => Math.abs(v.h - ink.rect.h) < 0.15 * ink.rect.h).map((v) => v.id) });
+      S.lastFit = fit && { ...fit, wordFonts: fit.wordFonts && fit.wordFonts.map((c) => c && c.id), ranked: fit.ranked.map((r) => [r.c.id, +r.iou.toFixed(3), +(r.ls / r.size).toFixed(3), +r.score.toFixed(3)]), c: fit.c.id };
+      if (fit && fit.iou > 0.35) { font = { fam: await ensureLibFont(fit.c), b: false, i: false }; (S.libVotes = S.libVotes || []).push({ id: fit.c.id, h: ink.rect.h }); } else fit = null;
+    } catch (e) { console.warn('reconnaissance de police impossible', e); fit = null; }
+  }
   const area = ink ? ink.rect : l.rect; // zone réellement occupée par les lettres visibles
-  const cols = sampleColors(area);
+  const cols = ink ? sampleColors(area, S.hi.cv, S.hi.k) : sampleColors(area);
+  if (ink) cols.bg = ringBg(area, S.hi.cv, S.hi.k) || cols.bg;
   // couleurs par portion (ex. un mot en orange dans un titre sombre) : positions en px de scène
   let paras = null, color = cols.fg;
   const toks = [];
   const parts = l.parts || [{ str: l.str, e: l.e, x1: l.x1 }];
   const raws = parts.map((pt2) => [...pt2.str.matchAll(/\S+|\s+/g)].map((m) => m[0]));
-  if (ink) { // positions réparties proportionnellement aux largeurs de la police sur la largeur visible
-    const all = raws.flat(), ws = all.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text)), tot = ws.reduce((a, c) => a + c, 0) || 1;
-    let x = area.x;
-    all.forEach((t, i) => { const w = (ws[i] / tot) * area.w; toks.push({ t, x0: x, x1: x + w, sp: /^\s/.test(t) }); x += w; });
+  if (ink) {
+    const all = raws.flat();
+    if (spans) {
+      let wi = 0, lastX1 = area.x;
+      all.forEach((t) => {
+        if (/^\s/.test(t)) { toks.push({ t, x0: lastX1, x1: lastX1, sp: true }); return; }
+        const sp = spans[wi++], x0 = area.x + sp.a / ink.k, x1 = area.x + sp.b / ink.k; lastX1 = x1;
+        toks.push({ t, x0, x1, sp: false });
+      });
+    } else { // sinon répartition proportionnelle aux largeurs de la police
+      const ws = all.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text)), tot = ws.reduce((a, c) => a + c, 0) || 1;
+      let x = area.x;
+      all.forEach((t, i) => { const w = (ws[i] / tot) * area.w; toks.push({ t, x0: x, x1: x + w, sp: /^\s/.test(t) }); x += w; });
+    }
   } else {
     parts.forEach((pt2, pi) => {
       const raw = raws[pi], ws = raw.map((t) => wOf({ ...font, sz: l.size }, safeF(font, t).text));
@@ -672,26 +750,36 @@ async function startEditLine(l, pt) {
   }
   if (toks.filter((t) => !t.sp).length > 1) {
     let prev = cols.fg;
-    const cs = toks.map((t) => (t.sp ? prev : (prev = sampleColors({ x: t.x0, y: area.y, w: t.x1 - t.x0, h: area.h }).fg)));
+    const smp = (r) => (ink ? sampleColors(r, S.hi.cv, S.hi.k) : sampleColors(r));
+    const cs = toks.map((t) => (t.sp ? prev : (prev = smp({ x: t.x0, y: area.y, w: t.x1 - t.x0, h: area.h }).fg)));
     const near = (p, q) => { const [r1, g1, b1] = hexRgb(p), [r2, g2, b2] = hexRgb(q); return (r1 - r2) ** 2 + (g1 - g2) ** 2 + (b1 - b2) ** 2 < 2400; };
-    const runs = [];
-    toks.forEach((t, i) => { const last = runs[runs.length - 1]; if (last && near(last.c, cs[i])) last.t += t.t; else runs.push({ t: t.t, c: cs[i] }); });
+    // police par mot (mots dont la forme diffère nettement de la police de la ligne)
+    const wf = [];
+    if (fit && fit.wordFonts && spans) { let wi = 0; for (const t of toks) { if (t.sp) { wf.push(wf.length ? wf[wf.length - 1] : null); continue; } wf.push(fit.wordFonts[wi++] || null); } }
+    const fams = {};
+    for (const c of new Set(wf.filter(Boolean))) fams[c.id] = await ensureLibFont(c);
+    const lineFam = font.fam, runs = [];
+    toks.forEach((t, i) => {
+      const fam = wf[i] ? fams[wf[i].id] : lineFam, last = runs[runs.length - 1];
+      if (last && near(last.c, cs[i]) && last.fam === fam) last.t += t.t; else runs.push({ t: t.t, c: cs[i], fam });
+    });
     if (runs.length > 1) {
       color = runs[0].c;
-      paras = [{ runs: runs.map((r, i) => (i === 0 ? { t: r.t } : { t: r.t, c: r.c })) }];
+      paras = [{ runs: runs.map((r) => { const o2 = { t: r.t }; if (!near(r.c, color)) o2.c = r.c; if (r.fam !== lineFam) o2.f = r.fam; return o2; }) }];
     }
   }
   const pad = ink ? 2 : 0.5;
   const o = {
-    id: uid('o'), type: 'text', x: 0, y: 0, w: 10, h: 10, text: l.str, orig: l.str, font, size: r1(l.size * 100) / 100,
+    id: uid('o'), type: 'text', x: 0, y: 0, w: 10, h: 10, text: l.str, orig: l.str, font, size: r1((fit ? fit.size / ink.k : l.size) * 100) / 100,
+    ls: fit ? Math.round((fit.ls / fit.size) * 1000) / 1000 : 0,
     color, align: 'left', lh: 1.2, autoW: true, fill: null, stroke: null, sw: 0, dirty: false,
     rm: { x0: l.e, x1: l.x1, y: l.f, size: l.size, bg: cols.bg, disp: { x: area.x - pad, y: area.y - (ink ? pad : 0), w: area.w + 2 * pad, h: area.h + (ink ? 2 * pad : 0) } },
     maskNeeded: true, forceMask: invisible,
   };
   if (paras) o.paras = paras;
   normalize(o);
-  o.x = (ink ? area.x : l.dx) - PAD;
-  o.y = (ink ? area.y + 0.72 * l.size : l.base) - layout(o).lines[0].base; // les majuscules montent à ~72 % du corps
+  o.x = (ink ? area.x - (fit ? fit.lsb / ink.k : 0) : l.dx) - PAD; // l'origine du texte précède l'encre de la marge gauche de la 1re lettre
+  o.y = (ink ? area.y + (fit ? fit.baseOff / ink.k : 0.72 * l.size) : l.base) - layout(o).lines[0].base;
   S.objs[S.cur].push(o);
   scheduleRebuild();
   startEdit(o);
@@ -785,7 +873,14 @@ async function buildPdf(draw) {
             const font = await getFont({ fam: it.st.fam, b: it.st.b, i: it.st.i });
             const col = pdfColor(it.st.c);
             const p0 = P(o.x + it.x, o.y + ln.base);
-            page.drawText(it.text, { x: p0[0], y: p0[1], size: it.st.sz, font, color: col, rotate: degrees(rot) });
+            if (it.st.ls) { // interlettrage : lettre par lettre
+              let cx = 0;
+              for (const ch of it.text) {
+                const q = P(o.x + it.x + cx, o.y + ln.base);
+                if (ch.trim()) page.drawText(ch, { x: q[0], y: q[1], size: it.st.sz, font, color: col, rotate: degrees(rot) });
+                cx += font.widthOfTextAtSize(ch, it.st.sz) + it.st.ls * it.st.sz;
+              }
+            } else page.drawText(it.text, { x: p0[0], y: p0[1], size: it.st.sz, font, color: col, rotate: degrees(rot) });
             if (it.st.u) {
               const yy = o.y + ln.base + it.st.sz * 0.1, a = P(o.x + it.x, yy), b = P(o.x + it.x + it.w, yy);
               page.drawLine({ start: { x: a[0], y: a[1] }, end: { x: b[0], y: b[1] }, thickness: Math.max(0.5, it.st.sz * 0.055), color: col });
@@ -950,7 +1045,7 @@ async function openBytes(bytes, name) {
     const task = pdfjsLib.getDocument({ data: bytes.slice(), fontExtraProperties: true });
     const pdf = await task.promise;
     if (S.task) S.task.destroy();
-    embCache.clear(); S.fonts = S.fonts.filter((f) => !f.partial); fillFontSelect();
+    embCache.clear(); S.libVotes = []; S.hi = null; S.fonts = S.fonts.filter((f) => !f.partial); fillFontSelect();
     Object.assign(S, {
       task,
       name, origBytes: bytes, origDoc, pdf, cur: 0, objs: [], analysis: [], lines: [], sel: null, editing: null,
@@ -1024,7 +1119,7 @@ function hitObj(x, y) {
   for (let i = arr.length - 1; i >= 0; i--) {
     const o = arr[i];
     if (o.deleted) continue;
-    if (o.type === 'pdfimage' && S.tool !== 'select') continue;
+    if (o.type === 'pdfimage' && (S.tool !== 'select' || o.w * o.h > 0.85 * S.pages[S.cur].w * S.pages[S.cur].h)) continue; // pas d'image : ou image plein page (fond)
     if (x >= o.x && x <= o.x + o.w && y >= o.y && y <= o.y + o.h) return o;
   }
   return null;
@@ -1350,7 +1445,10 @@ const F = {};
 function fillFontSelect() {
   F.fFont.innerHTML = '';
   for (const fam of Object.keys(STD)) F.fFont.append(h('option', { value: fam }, STD_META[fam].label));
-  for (const f of S.fonts) F.fFont.append(h('option', { value: 'f:' + f.id }, f.name));
+  for (const f of S.fonts) if (!f.lib) F.fFont.append(h('option', { value: 'f:' + f.id }, f.name));
+  const g = h('optgroup', { label: 'Polices libres incluses' });
+  for (const c of LIB) { const f = libFont(c); g.append(h('option', { value: f ? 'f:' + f.id : 'lib:' + c.id }, libLabel(c))); }
+  F.fFont.append(g);
 }
 const pmDef = (o) => ({ b: !!o.font.b, i: !!o.font.i, u: false, c: o.color, sz: o.size, f: o.font.fam });
 const pmVal = (marks, key, def) => { const m = marks.find((x) => x.type.name === key); return m ? m.attrs.v : def; };
@@ -1444,7 +1542,11 @@ RT.setFontCss((fam) => fontInfo({ fam, b: false, i: false }).css);
 fillFontSelect();
 document.querySelectorAll('#fmt button').forEach((b) => b.addEventListener('mousedown', (e) => e.preventDefault()));
 F.fB.onclick = () => fmtToggle('b'); F.fI.onclick = () => fmtToggle('i'); F.fU.onclick = () => fmtToggle('u');
-F.fFont.onchange = () => fmtValue('f', F.fFont.value);
+F.fFont.onchange = async () => {
+  let v = F.fFont.value;
+  if (v.startsWith('lib:')) { const c = LIB.find((x) => 'lib:' + x.id === v); v = await ensureLibFont(c); }
+  fmtValue('f', v);
+};
 F.fSize.onchange = () => { const v = parseFloat(F.fSize.value); if (v >= 1) fmtValue('sz', v); };
 F.fColor.oninput = () => fmtValue('c', F.fColor.value);
 F.fBul.onclick = () => toggleList('b'); F.fNum.onclick = () => toggleList('n');

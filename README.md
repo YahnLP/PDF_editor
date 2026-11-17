@@ -16,6 +16,19 @@
 
 L'export passe par [pdf-lib](https://pdf-lib.js.org/) : les pages d'origine, leurs ressources, formulaires, signets, etc. sont conservés ; seuls les flux de contenu des pages modifiées sont réécrits (et rééquilibrés `q`/`Q`). Les objets ajoutés sont de vrais éléments PDF (texte, rectangles, images). Le résultat est vérifié avec `qpdf --check` et `poppler`.
 
+
+## PDF scannés ou « dessinés » (image + couche OCR)
+
+Beaucoup de PDF (brochures exportées en image, scans, PDF OCR) ne contiennent **aucune police ni couleur** : le texte visible est une image, et le texte réel est une couche invisible (« Glyphless »).
+L'éditeur le détecte et reconstitue le texte au clic :
+
+1. il retrouve sur la page (rendue à ~288 ppi) la ligne de lettres réellement visible sous le clic ;
+2. il redessine le texte connu (OCR) avec chaque police de la bibliothèque libre incluse (`fonts/`) et garde celle dont la silhouette recouvre le mieux l'encre : famille, graisse, **corps**, **interlettrage** et ligne de base sont déduits (comparaison mot à mot) ;
+3. il relève la **couleur de chaque mot** et la couleur de fond ;
+4. l'ancienne ligne est masquée (aplat à la couleur du fond) et le texte reconstitué est éditable comme dans un traitement de texte ; à l'export il est écrit avec la police intégrée (sous-ensemble).
+
+Limites : seules les familles de la bibliothèque sont reconnues (la plus proche est choisie sinon ; on peut importer sa police .ttf/.otf) ; fond uni recommandé sous le texte (pas de remplissage de photo) ; les très petits corps sont moins fiables.
+
 ## Limites connues
 
 - Les PDF **chiffrés / protégés par mot de passe** ne sont pas pris en charge. Une **signature numérique** est invalidée par toute modification.
@@ -45,3 +58,6 @@ npm run build        # produit index.html
 | Saisie de texte riche | [ProseMirror](https://prosemirror.net) | MIT |
 
 Aucun moteur libre ne modifie sur place le texte et les images d'un PDF existant : c'est le rôle de `src/engine.js`, propre à ce projet.
+
+
+Polices libres incluses : voir `fonts/README.md` (SIL OFL 1.1, via @fontsource).

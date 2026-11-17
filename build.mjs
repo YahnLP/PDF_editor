@@ -7,6 +7,7 @@ let ver = 'dev'; try { ver = execSync('git rev-parse --short HEAD').toString().t
 const res = await build({
   entryPoints: ['src/app.js'],
   bundle: true, minify: true, write: false, format: 'iife', target: 'es2022',
+  loader: { '.woff': 'binary' },
   define: { 'process.env.NODE_ENV': '"production"' },
   logLevel: 'warning',
 });
