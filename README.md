@@ -9,7 +9,8 @@
 - **Polices personnalisées** : import `.ttf` / `.otf`, intégrées (sous-ensemble) au PDF exporté.
 - **Zones** : rectangle et ellipse (remplissage, opacité, contour).
 - **Images** : insertion (PNG, JPEG, autres formats convertis) ; **déplacement, redimensionnement, suppression et remplacement des images du document**, sur place (l'ordre d'empilement est conservé).
-- Annuler / rétablir, vignettes, zoom, déplacement aux flèches, raccourcis (`V` `T` `R` `E` `I`, `Suppr`, `Ctrl+Z/Y/D/S`).
+- **Champs de formulaire remplissables** (outil *Champ*, `F`) : texte, texte multiligne, case à cocher, liste déroulante. Ce sont de vrais champs AcroForm (nom, valeur par défaut, obligatoire, bordure, taille de police) qui restent remplissables dans Acrobat, les navigateurs, Aperçu… Indisponible sur les pages pivotées.
+- Annuler / rétablir, vignettes, zoom, déplacement aux flèches, raccourcis (`V` `T` `R` `E` `F` `I`, `Suppr`, `Ctrl+Z/Y/D/S`).
 
 ## Compatibilité du PDF produit
 

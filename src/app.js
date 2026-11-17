@@ -166,6 +166,20 @@ function objEl(o) {
     if (o.fill) d.style.background = hexA(o.fill, o.fop ?? 1);
     if (o.stroke && o.sw) d.style.boxShadow = `inset 0 0 0 ${o.sw}px ${o.stroke}`;
     if (o.type === 'ellipse') d.style.borderRadius = '50%';
+  } else if (o.type === 'field') {
+    d.style.cssText += 'box-sizing:border-box;background:rgba(37,99,235,.09);border:1px solid #2563eb;overflow:hidden;';
+    const fs = Math.min(o.size || 11, Math.max(6, o.h - 4));
+    const lab = h('div', { class: 'ln' });
+    lab.style.cssText = `left:3px;top:${o.ftype === 'multiline' ? 2 : 0}px;font:${fs}px/${o.ftype === 'multiline' ? fs * 1.2 : o.h - 2}px Helvetica,Arial,sans-serif;color:#111;white-space:pre-wrap;`;
+    if (o.ftype === 'check') {
+      lab.textContent = o.checked ? '✔' : ''; lab.style.cssText = `left:0;width:100%;text-align:center;top:0;font:${o.h * 0.8}px/${o.h - 2}px Helvetica,Arial,sans-serif;color:#111;`;
+    } else if (o.ftype === 'dropdown') {
+      lab.textContent = o.value || ''; const ar = h('div', { class: 'ln' }, '▾'); ar.style.cssText = `right:3px;top:0;font:${fs}px/${o.h - 2}px sans-serif;color:#2563eb;`; d.append(ar);
+    } else lab.textContent = o.value || '';
+    d.append(lab);
+    const tag = h('div', { class: 'ln' }, `${o.name}`);
+    tag.style.cssText = `left:0;top:-${12}px;font:600 9px/10px system-ui,sans-serif;color:#2563eb;white-space:nowrap;overflow:visible;`;
+    d.style.overflow = 'visible'; d.append(tag);
   } else if (o.type === 'image') {
     const a = S.assets[o.assetId];
     d.style.opacity = o.op ?? 1;
@@ -265,10 +279,18 @@ function reorder(o, dir) {
   if (dir === 'front') arr.push(o); else arr.splice(Math.max(first < 0 ? 0 : first, 0), 0, o);
   drawStage(); commit();
 }
+function uniqueName(base) {
+  const used = new Set();
+  for (const arr of S.objs) for (const o of arr) if (o.type === 'field') used.add(o.name);
+  let n = 1, nm = base;
+  while (used.has(nm)) { n++; nm = base + '_' + n; }
+  return nm;
+}
 function duplicate() {
   const o = curObj(); if (!o || o.type === 'pdfimage') return;
   const c = JSON.parse(JSON.stringify(o));
   c.id = uid('o'); c.x += 12; c.y += 12; delete c.rm; delete c.maskNeeded; delete c.orig;
+  if (c.type === 'field') c.name = uniqueName(c.name.replace(/_\d+$/, ''));
   S.objs[S.cur].push(c); S.sel = c.id;
   drawStage(); renderProps(); commit();
 }
@@ -510,7 +532,7 @@ async function buildPdf(draw) {
   for (let pi = 0; pi < pages.length; pi++) {
     const arr = S.objs[pi] || [];
     const edits = collectEdits(pi);
-    const drawables = draw ? arr.filter((o) => !o.deleted && (o.type === 'rect' || o.type === 'ellipse' || o.type === 'image' || o.type === 'text')) : [];
+    const drawables = draw ? arr.filter((o) => !o.deleted && (o.type === 'rect' || o.type === 'ellipse' || o.type === 'image' || o.type === 'text' || o.type === 'field')) : [];
     if (!edits.moves.length && !edits.regions.length && !drawables.length) continue;
     const an = await getAnalysis(pi);
     const page = pages[pi];
@@ -526,6 +548,7 @@ async function buildPdf(draw) {
       return { x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), width: Math.abs(b[0] - a[0]), height: Math.abs(b[1] - a[1]) };
     };
     for (const o of drawables) {
+      if (o.type === 'field') { await addField(doc, page, rectBox(o.x, o.y, o.w, o.h), o); continue; }
       if (o.rm && o.maskNeeded) {
         const d = o.rm.disp;
         page.drawRectangle({ ...rectBox(d.x, d.y, d.w, d.h), color: pdfColor(o.rm.bg), borderWidth: 0 });
@@ -559,6 +582,32 @@ async function buildPdf(draw) {
   }
   return { bytes: await doc.save(), removed };
 }
+
+async function addField(doc, page, b, o) {
+  const form = doc.getForm();
+  const used = new Set(form.getFields().map((f) => f.getName()));
+  let name = o.name || 'champ', n = 1;
+  while (used.has(name)) name = `${o.name}_${++n}`;
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  const opts = {
+    x: b.x, y: b.y, width: b.width, height: b.height, font,
+    borderWidth: o.border ? 1 : 0, borderColor: o.border ? rgb(0.15, 0.2, 0.3) : undefined, backgroundColor: rgb(0.93, 0.96, 1),
+  };
+  let f;
+  if (o.ftype === 'check') { f = form.createCheckBox(name); if (o.checked) f.check(); f.addToPage(page, opts); }
+  else if (o.ftype === 'dropdown') {
+    f = form.createDropdown(name); f.addOptions(o.options.length ? o.options : ['']);
+    if (o.value && o.options.includes(o.value)) f.select(o.value);
+    f.addToPage(page, opts); f.setFontSize(o.size || 11);
+  } else {
+    f = form.createTextField(name);
+    if (o.ftype === 'multiline') f.enableMultiline();
+    if (o.value) f.setText(safeTextFor(o.value));
+    f.addToPage(page, opts); f.setFontSize(o.size || 11);
+  }
+  if (o.required) f.enableRequired();
+}
+const safeTextFor = (t) => safeText({ font: { fam: 'helvetica', b: false, i: false } }, t).text;
 
 let rebuildTimer;
 function scheduleRebuild(force) {
@@ -738,6 +787,7 @@ function updateTop() {
    ===================================================================== */
 function setTool(t) {
   endEdit();
+  if (t === 'field' || t === 'rect' || t === 'ellipse') select(null);
   S.tool = t;
   document.querySelectorAll('#tools button').forEach((b) => b.classList.toggle('on', b.dataset.tool === t));
   stage.className = 't-' + t;
@@ -793,7 +843,7 @@ stage.addEventListener('pointerdown', (e) => {
     drag = { kind: 'newtext', p0: p, moved: false };
     return;
   }
-  if (S.tool === 'rect' || S.tool === 'ellipse') {
+  if (S.tool === 'rect' || S.tool === 'ellipse' || S.tool === 'field') {
     select(null);
     drag = { kind: 'newshape', p0: p, moved: false };
     return;
@@ -890,6 +940,17 @@ stage.addEventListener('pointerup', (e) => {
     normalize(o);
     S.objs[S.cur].push(o);
     startEdit(o);
+  } else if (d.kind === 'newshape' && S.tool === 'field') {
+    if (S.pages[S.cur].vp.rotation) { toast('Les champs de formulaire ne sont pas disponibles sur les pages pivotées.'); return; }
+    const ft = S.fieldType || 'text';
+    const dflt = { text: [170, 22], multiline: [200, 70], check: [16, 16], dropdown: [170, 22] }[ft];
+    let r = d.rect && d.rect.w > 6 && d.rect.h > 6 ? d.rect : { x: d.p0.x, y: d.p0.y - dflt[1] / 2, w: dflt[0], h: dflt[1] };
+    if (ft === 'check') { const m = Math.max(12, Math.min(r.w, r.h)); r = { x: r.x, y: r.y, w: m, h: m }; }
+    const o = { id: uid('o'), type: 'field', ftype: ft, name: uniqueName({ text: 'texte', multiline: 'zone_texte', check: 'case', dropdown: 'liste' }[ft]), ...r, size: 11, value: '', checked: false, options: ft === 'dropdown' ? ['Option 1', 'Option 2', 'Option 3'] : [], required: false, border: true };
+    if (ft === 'dropdown') o.value = o.options[0];
+    S.objs[S.cur].push(o);
+    setTool('select'); S.sel = o.id;
+    drawStage(); renderProps(); commit();
   } else if (d.kind === 'newshape') {
     const r = d.rect && d.rect.w > 4 && d.rect.h > 4 ? d.rect : { x: d.p0.x - 60, y: d.p0.y - 40, w: 120, h: 80 };
     const o = { id: uid('o'), type: S.tool === 'ellipse' ? 'ellipse' : 'rect', ...r, fill: '#ffe066', fop: 1, stroke: '#1f2937', sw: 1 };
@@ -983,6 +1044,7 @@ function renderProps() {
     const nl = (S.lines[S.cur] || []).length;
     const rot = S.pages[S.cur] && S.pages[S.cur].vp.rotation;
     put(
+      S.tool === 'field' ? [h('h3', {}, 'Type de champ à dessiner'), h('div', { class: 'row' }, ...[['text', 'Texte'], ['multiline', 'Multiligne'], ['check', 'Case à cocher'], ['dropdown', 'Liste déroulante']].map(([k, l]) => h('button', { class: 'btn small' + ((S.fieldType || 'text') === k ? ' primary' : ''), onclick: () => { S.fieldType = k; renderProps(); } }, l))), h('p', { class: 'hint' }, 'Glissez sur la page pour dessiner le champ (ou cliquez pour une taille par défaut).')] : null,
       nl === 0 ? h('div', { class: 'warn' }, rot
         ? 'Page pivotée : le texte existant n\'est pas modifiable ici (vous pouvez ajouter du texte, des zones et des images).'
         : 'Aucun texte modifiable détecté sur cette page : elle est probablement scannée (image) ou son texte est vectorisé. Vous pouvez quand même ajouter du texte, des zones et des images.') : null,
@@ -1031,6 +1093,31 @@ function renderProps() {
       o.fill ? h('label', { class: 'f' }, h('span', {}, 'Opacité'), (() => { const r = h('input', { type: 'range', min: 0, max: 1, step: 0.05, value: o.fop ?? 1 }); r.addEventListener('input', () => { o.fop = parseFloat(r.value); live(); }); r.addEventListener('change', () => commit()); return r; })()) : null,
       checkField('Contour', () => o.stroke && o.sw, (v) => { o.stroke = v ? (o.stroke || '#1f2937') : null; o.sw = v ? (o.sw || 1) : 0; }, o.stroke && o.sw ? colorField('', () => o.stroke, (v) => { o.stroke = v; }) : null),
       o.stroke && o.sw ? numField('Épaisseur', () => o.sw, (v) => { o.sw = Math.max(0, v); }, { step: 0.5, min: 0 }) : null,
+      ...geom(o), orderButtons(o), actionButtons(o));
+    return;
+  }
+  if (o.type === 'field') {
+    const kinds = [['text', 'Texte'], ['multiline', 'Multiligne'], ['check', 'Case'], ['dropdown', 'Liste']];
+    const nameInp = h('input', { type: 'text', value: o.name });
+    nameInp.addEventListener('input', () => { o.name = nameInp.value.replace(/[.\s]+/g, '_'); live(); });
+    nameInp.addEventListener('change', () => { if (!o.name) o.name = uniqueName('champ'); commit(); renderProps(); });
+    put(
+      h('h3', {}, 'Champ de formulaire'),
+      h('div', { class: 'f' }, h('span', {}, 'Type'), h('div', { class: 'seg' }, ...kinds.map(([k, l]) => h('button', { class: o.ftype === k ? 'on' : '', style: 'padding:4px 6px;font-size:11px', onclick: () => { o.ftype = k; if (k === 'dropdown' && !o.options.length) o.options = ['Option 1', 'Option 2']; if (k === 'check') { o.w = o.h = Math.min(o.w, o.h, 20); } drawStage(); renderProps(); commit(); } }, l)))),
+      h('label', { class: 'f' }, h('span', {}, 'Nom'), nameInp),
+      o.ftype === 'check'
+        ? checkField('Cochée par défaut', () => o.checked, (v) => { o.checked = v; })
+        : o.ftype === 'dropdown'
+          ? [h('div', { class: 'hint' }, 'Options (une par ligne)'), (() => {
+            const t = h('textarea', { rows: 4, style: 'width:100%;border:1px solid var(--line);border-radius:6px;padding:4px 6px;font:inherit' }); t.value = o.options.join('\n');
+            t.addEventListener('input', () => { o.options = t.value.split('\n').map((x) => x.trim()).filter(Boolean); if (!o.options.includes(o.value)) o.value = o.options[0] || ''; live(); });
+            t.addEventListener('change', () => { commit(); renderProps(); }); return t; })(),
+          (() => { const sl = h('select', {}, o.options.map((x) => h('option', { value: x }, x))); sl.value = o.value; sl.addEventListener('change', () => { o.value = sl.value; live(); commit(); }); return h('label', { class: 'f' }, h('span', {}, 'Valeur par défaut'), sl); })()]
+          : (() => { const vi = h('input', { type: 'text', value: o.value }); vi.addEventListener('input', () => { o.value = vi.value; live(); }); vi.addEventListener('change', () => commit()); return h('label', { class: 'f' }, h('span', {}, 'Valeur par défaut'), vi); })(),
+      o.ftype === 'check' ? null : numField('Taille police', () => o.size, (v) => { o.size = Math.max(4, v); }, { min: 4, step: 1 }),
+      checkField('Obligatoire', () => o.required, (v) => { o.required = v; }),
+      checkField('Bordure', () => o.border, (v) => { o.border = v; }),
+      h('p', { class: 'hint' }, 'Ce champ reste remplissable dans tout lecteur PDF (Acrobat, navigateurs, aperçu…).'),
       ...geom(o), orderButtons(o), actionButtons(o));
     return;
   }
@@ -1100,7 +1187,7 @@ document.addEventListener('keydown', (e) => {
   if (mod && e.key.toLowerCase() === 'd') { e.preventDefault(); duplicate(); return; }
   if (mod) return;
   const k = e.key.toLowerCase();
-  const map = { v: 'select', t: 'text', r: 'rect', e: 'ellipse', i: 'image' };
+  const map = { v: 'select', t: 'text', r: 'rect', e: 'ellipse', i: 'image', f: 'field' };
   if (map[k]) { setTool(map[k]); return; }
   const o = curObj();
   if (!o) { if (k === 'pagedown') gotoPage(S.cur + 1); if (k === 'pageup') gotoPage(S.cur - 1); return; }

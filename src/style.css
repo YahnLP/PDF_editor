@@ -70,3 +70,4 @@ textarea.edit{position:absolute;margin:0;border:0;outline:1px dashed var(--accen
 .chk{display:flex;align-items:center;gap:6px}
 #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:#111827;color:#fff;padding:9px 16px;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.3);z-index:50;max-width:80vw}
 .danger{color:#b91c1c}
+.f input[type=text],.f input[type=number],.f select{min-width:0;max-width:128px}
