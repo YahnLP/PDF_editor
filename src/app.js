@@ -702,7 +702,7 @@ async function openBytes(bytes, name) {
     await renderCanvas(); await computeLines();
     drawStage(); renderProps(); updateTop();
     buildThumbs().then(markThumb);
-    setTool('select');
+    setTool('text');
   } catch (e) {
     console.error(e);
     toast(/encrypt/i.test(e.message) ? 'Ce PDF est protégé par mot de passe : il ne peut pas être modifié ici.' : 'Impossible d\'ouvrir ce PDF : ' + e.message, 6000);
@@ -800,7 +800,11 @@ stage.addEventListener('pointerdown', (e) => {
   }
   // sélection
   const o = hitObj(p.x, p.y);
-  if (!o) { select(null); return; }
+  if (!o) {
+    const l = lineAt(p.x, p.y);
+    if (l) { startEditLine(l); return; }
+    select(null); return;
+  }
   select(o.id);
   if (e.detail === 2 && o.type === 'text') { startEdit(o); return; }
   drag = { kind: 'move', o, p0: p, start: { x: o.x, y: o.y }, moved: false };
@@ -821,6 +825,7 @@ stage.addEventListener('pointermove', (e) => {
     } else if (S.tool === 'select') {
       const o = hitObj(p.x, p.y);
       if (o) { cursor = 'move'; if (o.type === 'pdfimage') showHover(o); }
+      else { const l = lineAt(p.x, p.y); if (l) { showHover(l.rect); cursor = 'text'; } }
     }
     stage.style.cursor = cursor;
     return;
@@ -975,7 +980,12 @@ function renderProps() {
   propsEl.innerHTML = '';
   if (!S.pdf) { put(h('p', { class: 'hint' }, 'Ouvrez un PDF pour commencer.')); return; }
   if (!o) {
+    const nl = (S.lines[S.cur] || []).length;
+    const rot = S.pages[S.cur] && S.pages[S.cur].vp.rotation;
     put(
+      nl === 0 ? h('div', { class: 'warn' }, rot
+        ? 'Page pivotée : le texte existant n\'est pas modifiable ici (vous pouvez ajouter du texte, des zones et des images).'
+        : 'Aucun texte modifiable détecté sur cette page : elle est probablement scannée (image) ou son texte est vectorisé. Vous pouvez quand même ajouter du texte, des zones et des images.') : null,
       h('h3', {}, 'Aide'),
       h('p', { class: 'hint' }, h('b', {}, 'Texte'), ' : cliquez sur un texte du document pour le modifier (police, taille et couleur sont repris), ou dans le vide pour en ajouter.'),
       h('p', { class: 'hint' }, h('b', {}, 'Sélection'), ' : cliquez une image du document, une zone ou un texte ajouté pour le déplacer ou le redimensionner. Les images du document sont surlignées au survol.'),
