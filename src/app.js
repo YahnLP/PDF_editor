@@ -418,6 +418,8 @@ function startEditDom(o) {
     toggle: (k) => fmtToggle(k),
     blur: () => { if (S.view) S.view.dom.blur(); },
   });
+  ed.classList.toggle('inplace', !!o.rm);
+  document.body.classList.toggle('inplace', !!o.rm);
   styleEd(o);
   S.view.dom.addEventListener('keydown', (e) => e.stopPropagation());
   S.view.dom.addEventListener('blur', (e) => {
@@ -455,7 +457,7 @@ function startEdit(o) {
 }
 function endEdit(silent) {
   const o = S.editing; if (!o) return;
-  S.editing = null;
+  S.editing = null; document.body.classList.remove('inplace');
   if (S.view) { S.view.destroy(); S.view = null; }
   if (S.ta) { S.ta.remove(); S.ta = null; }
   if (o.text === '' && !o.rm) { removeObj(o); S.sel = null; }

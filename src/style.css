@@ -89,3 +89,8 @@ button:disabled{opacity:.4;cursor:default;pointer-events:none}
 .edit div{position:relative;min-height:1em}
 .edit div[data-m]::before{content:attr(data-m);position:absolute;left:var(--ml,0);top:0}
 .edit .ProseMirror-selectednode{outline:none}
+
+/* édition « directe » d'une ligne existante : aucun cadre, le texte reste à sa place */
+.edit.inplace{outline:none;background:transparent}
+body.inplace #sel{display:none!important}
+body.inplace #hover{display:none!important}
